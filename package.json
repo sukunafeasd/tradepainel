@@ -1,0 +1,44 @@
+{
+  "name": "dieftrade",
+  "productName": "DiefTrade",
+  "version": "0.2.0",
+  "description": "Assistente profissional de leitura de mercado e paper trading para day trade de criptomoedas.",
+  "author": "Equipe Dief",
+  "license": "UNLICENSED",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "set DIEFTRADE_DEV=1&& electron .",
+    "test": "node --test tests/*.test.cjs",
+    "check": "node scripts/check.cjs && node --test tests/*.test.cjs",
+    "build": "electron-builder --win portable",
+    "build:dir": "electron-builder --dir"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "br.com.dief.trade",
+    "productName": "DiefTrade",
+    "artifactName": "DiefTrade-${version}-${arch}.${ext}",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/brand/dieftrade.ico",
+      "target": [
+        "portable"
+      ],
+      "legalTrademarks": "DiefTrade"
+    }
+  }
+}

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DiefTrade</title>
+  <link rel="icon" href="/brand.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient a1"></div><div class="ambient a2"></div>
+  <header class="topbar">
+    <div class="brand"><img src="/brand.png" alt="DiefTrade"><div><b>DiefTrade</b><span>Market Intelligence</span></div></div>
+    <div class="market-state"><span class="pulse" id="pulse"></span><span id="connection">conectando…</span><span class="divider"></span><span id="clock">--:--:--</span></div>
+    <div class="safety">ANÁLISE + SIMULAÇÃO <b>• SEM ORDENS REAIS</b></div>
+  </header>
+
+  <div class="shell">
+    <aside class="scanner panel">
+      <div class="scanner-head"><div><span class="eyebrow">RADAR DE MERCADO</span><h2>Pares líquidos</h2></div><span id="coinCount" class="badge">0</span></div>
+      <label class="search"><span>⌕</span><input id="coinSearch" placeholder="Buscar BTC, ETH…" autocomplete="off"></label>
+      <div class="scanner-columns"><span>PAR</span><span>PREÇO</span><span>24H</span></div>
+      <div id="coinList" class="coin-list"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
+    </aside>
+
+    <main class="workspace">
+      <section class="hero panel">
+        <div class="asset-title"><div class="coin-mark" id="coinMark">₿</div><div><span class="eyebrow">ATIVO SELECIONADO</span><h1 id="symbol">BTC/USDT</h1></div></div>
+        <div class="price-block"><span id="price">--</span><small id="change">--</small></div>
+        <div class="intervals" id="intervals">
+          <button data-i="1m">1m</button><button data-i="5m">5m</button><button class="active" data-i="15m">15m</button><button data-i="1h">1h</button><button data-i="4h">4h</button><button data-i="1d">1D</button>
+        </div>
+      </section>
+
+      <section class="signal-grid">
+        <article class="signal-card panel"><span class="eyebrow">LEITURA ATUAL</span><div class="signal" id="signal">ANALISANDO</div><p id="regime">Carregando estrutura do mercado…</p></article>
+        <article class="metric-card panel"><span class="eyebrow">CONFLUÊNCIA</span><strong id="confidence">--</strong><div class="meter"><i id="confidenceBar"></i></div><small>qualidade dos fatores, não chance garantida</small></article>
+        <article class="metric-card panel"><span class="eyebrow">SCORE</span><strong id="score">--</strong><div class="score-scale"><i></i><b id="scoreDot"></b></div><small>-100 venda · +100 compra</small></article>
+        <article class="metric-card panel"><span class="eyebrow">ALINHAMENTO MTF</span><strong id="alignment">--</strong><div class="frame-pills" id="frames"></div><small>1m · 5m · 15m · 1h · 4h</small></article>
+      </section>
+
+      <section class="chart-panel panel">
+        <div class="section-head"><div><span class="eyebrow">PREÇO + CONTEXTO</span><h2>Leitura de velas</h2></div><div class="legend"><span class="ema9">EMA 9</span><span class="ema20">EMA 20</span><span class="ema50">EMA 50</span><span class="vwap">VWAP</span></div></div>
+        <div class="chart-wrap"><canvas id="chart"></canvas><div id="chartEmpty" class="chart-empty">Carregando 500 velas…</div></div>
+      </section>
+
+      <nav class="tabs" id="tabs">
+        <button class="active" data-tab="reading">Leitura</button><button data-tab="flow">Fluxo & book</button><button data-tab="risk">Plano & níveis</button><button data-tab="paper">Simulador</button><button data-tab="alerts">Alertas & diário</button><button data-tab="ai">IA opcional</button>
+      </nav>
+
+      <section class="tab-page active" id="tab-reading">
+        <div class="two-col">
+          <article class="panel detail"><div class="section-head"><h2>Por que essa leitura?</h2><span class="badge">EXPLICÁVEL</span></div><div id="reasons" class="reason-list"></div></article>
+          <article class="panel detail"><div class="section-head"><h2>Indicadores</h2><span id="staleBadge" class="badge">AO VIVO</span></div><div id="indicators" class="data-grid"></div></article>
+        </div>
+        <article class="panel warnings" id="warningBox"><h3>Atenção antes de qualquer decisão</h3><div id="warnings"></div></article>
+      </section>
+
+      <section class="tab-page" id="tab-flow">
+        <div class="three-col">
+          <article class="panel gauge-card"><span class="eyebrow">AGRESSÃO</span><strong id="buyRatio">--</strong><div class="split"><i id="buySplit"></i></div><small>compradores no fluxo recente</small></article>
+          <article class="panel gauge-card"><span class="eyebrow">BOOK IMBALANCE</span><strong id="imbalance">--</strong><div class="split"><i id="bookSplit"></i></div><small>peso bid vs. ask</small></article>
+          <article class="panel gauge-card"><span class="eyebrow">SPREAD</span><strong id="spread">--</strong><small>liquidez instantânea</small><span class="submetric" id="delta">Delta: --</span></article>
+        </div>
+        <div class="two-col"><article class="panel detail"><h2>Book de ofertas</h2><div class="book-head"><span>BIDS</span><span>ASKS</span></div><div id="book" class="book"></div></article><article class="panel detail"><h2>Negócios recentes</h2><div id="tape" class="tape"></div></article></div>
+      </section>
+
+      <section class="tab-page" id="tab-risk">
+        <div class="two-col"><article class="panel detail"><h2>Plano técnico sugerido</h2><div id="riskPlan" class="risk-plan"></div><p class="legal">Referência educativa para simulação. Ajuste ao seu risco e nunca opere dinheiro que não pode perder.</p></article><article class="panel detail"><h2>Suportes e resistências</h2><div id="levels" class="levels"></div></article></div>
+      </section>
+
+      <section class="tab-page" id="tab-paper">
+        <div class="paper-summary panel"><div><span>Saldo simulado</span><b id="cash">--</b></div><div><span>Patrimônio</span><b id="equity">--</b></div><div><span>Retorno</span><b id="paperReturn">--</b></div><div><span>Realizado</span><b id="realized">--</b></div></div>
+        <div class="two-col"><form class="panel detail form" id="paperForm"><div class="section-head"><h2>Ordem simulada</h2><span class="badge paper-badge">PAPER</span></div><div class="side-toggle"><button type="button" class="active buy" data-side="buy">Comprar</button><button type="button" class="sell" data-side="sell">Vender</button></div><label>Quantidade<input id="paperQty" type="number" min="0" step="any" placeholder="0.001" required></label><label>Nota<input id="paperNote" maxlength="300" placeholder="Motivo da simulação"></label><button class="primary" type="submit">Executar no simulador</button><p id="paperMessage" class="form-message"></p></form><article class="panel detail"><h2>Posições abertas</h2><div id="positions" class="table-list"></div><h3>Histórico recente</h3><div id="trades" class="table-list compact"></div></article></div>
+      </section>
+
+      <section class="tab-page" id="tab-alerts">
+        <div class="two-col"><form class="panel detail form" id="alertForm"><h2>Novo alerta local</h2><label>Condição<select id="alertKind"><option value="price_gte">Preço acima ou igual</option><option value="price_lte">Preço abaixo ou igual</option></select></label><label>Preço-alvo<input id="alertValue" type="number" min="0" step="any" required></label><label>Nota<input id="alertNote" maxlength="300"></label><button class="primary" type="submit">Criar alerta</button><div id="alertsList" class="mini-list"></div></form><form class="panel detail form" id="journalForm"><h2>Diário do trade</h2><label>Setup<input id="journalSetup" maxlength="120" placeholder="Rompimento, pullback…"></label><label>Observação<textarea id="journalNote" maxlength="2000" rows="4"></textarea></label><button class="primary ghost" type="submit">Salvar anotação</button><div id="journalList" class="mini-list"></div></form></div>
+      </section>
+
+      <section class="tab-page" id="tab-ai">
+        <article class="panel ai-panel"><div class="ai-copy"><span class="eyebrow gold">SEGUNDA LEITURA</span><h2>IA com contexto técnico controlado</h2><p>A IA recebe somente os indicadores calculados e explica cenários. Ela não envia ordens, não vê sua conta da corretora e não substitui sua decisão.</p><div class="secure-note">🔒 A chave fica criptografada pelo Windows neste computador e nunca aparece novamente.</div></div><form class="form" id="aiForm"><label>Nova chave da OpenAI<input id="aiKey" type="password" autocomplete="off" placeholder="Cole uma chave nova aqui"></label><label>Modelo<input id="aiModel" value="gpt-5" pattern="[A-Za-z0-9._-]+"></label><div class="row"><button class="primary" type="submit">Salvar com segurança</button><button class="danger" id="removeAi" type="button">Remover</button></div><p id="aiStatus" class="form-message"></p></form><button class="ai-read" id="aiRead">Gerar leitura complementar</button><div id="aiResult" class="ai-result">Configure uma chave nova para habilitar. Revogue a chave que foi exposta no chat.</div></article>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

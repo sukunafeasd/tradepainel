@@ -1,1 +1,39 @@
-# tradepainel
+# DiefTrade
+
+Assistente desktop de leitura de mercado e **paper trading** para day trade de criptomoedas. Ele acompanha pares líquidos em USDT, combina indicadores técnicos, estrutura, velas e microestrutura e explica por que chegou a `COMPRA`, `VENDA` ou `AGUARDE`.
+
+## O que já existe
+
+- scanner ao vivo dos pares USDT mais líquidos;
+- velas e médias EMA 9/20/50, VWAP e volume;
+- RSI, MACD, Bollinger, ATR, ADX, Estocástico, OBV, ROC e volume relativo;
+- suportes, resistências, pivôs, padrões de vela e estrutura de mercado;
+- fluxo de agressão, delta, spread e desequilíbrio do book;
+- confluência de 1m, 5m, 15m, 1h e 4h;
+- plano técnico com stop, alvos e tamanho de posição de referência;
+- simulador local com saldo, posições, taxas e histórico;
+- alertas de preço e diário do trader;
+- leitura complementar opcional pela OpenAI.
+
+## Princípios
+
+- sinais são leitura técnica, não promessa de lucro;
+- “confiança” mede a qualidade da confluência, não uma probabilidade garantida;
+- o programa não possui chave de corretora e não envia ordens reais;
+- a chave opcional da OpenAI é criptografada pelo Windows e nunca volta à interface;
+- a chave nunca deve ser colocada no código, GitHub ou conversa;
+- servidor local limitado a `127.0.0.1`, protegido por token aleatório, mesma origem e CSP;
+- dados de mercado públicos da Binance, com WebSocket ao vivo e fallback REST.
+
+## Desenvolvimento
+
+Requer Node.js 22+ e pnpm.
+
+```text
+pnpm install
+pnpm run check
+pnpm start
+pnpm build
+```
+
+O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
