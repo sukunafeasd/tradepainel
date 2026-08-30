@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { token:"", symbol:"BTCUSDT", interval:"15m", coins:[], live:null, analysis:null, paper:null, alerts:[], journal:[], side:"buy", eventSource:null };
+const state = { token:"", symbol:"BTCUSDT", interval:"15m", coins:[], live:null, analysis:null, paper:null, alerts:[], journal:[], side:"buy", eventSource:null, chartFrame:null };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>'"]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
 const fmt = (v, max=8) => Number.isFinite(Number(v)) ? new Intl.NumberFormat("pt-BR",{maximumFractionDigits:max}).format(Number(v)) : "--";
@@ -20,11 +20,12 @@ function clock(){ $("clock").textContent=new Date().toLocaleTimeString("pt-BR");
 function setConnection(online,text){ $("pulse").className=`pulse ${online?"online":"offline"}`; $("connection").textContent=text; }
 
 async function bootstrap(){
-  readToken(); clock(); setInterval(clock,1000);
+  readToken(); applyPreferences(); clock(); setInterval(clock,1000);
   bind();
   try{
     const data=await api("/api/bootstrap");
     state.coins=data.coins||[]; state.symbol=data.selected.symbol; state.interval=data.selected.interval; state.paper=data.paper; state.alerts=data.alerts||[]; state.journal=data.journal||[];
+    $("aiStatus").textContent=data.ai?.configured?`Chave protegida · ${data.ai.model}`:"IA ainda não configurada";
     renderCoins(); renderPaper(); renderAlerts(); renderJournal(); updateSelection(); connectStream();
     await refreshAnalysis();
     setInterval(refreshCoins,10000); setInterval(()=>refreshAnalysis(true),6500);
@@ -36,9 +37,20 @@ function bind(){
   $("intervals").addEventListener("click",async(e)=>{const b=e.target.closest("button[data-i]");if(!b)return;state.interval=b.dataset.i;await selectMarket();});
   $("tabs").addEventListener("click",(e)=>{const b=e.target.closest("button[data-tab]");if(!b)return;document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("active",x===b));document.querySelectorAll(".tab-page").forEach(x=>x.classList.toggle("active",x.id===`tab-${b.dataset.tab}`));if(b.dataset.tab==="reading")drawChart();});
   document.querySelectorAll(".side-toggle button").forEach(b=>b.addEventListener("click",()=>{state.side=b.dataset.side;document.querySelectorAll(".side-toggle button").forEach(x=>x.classList.toggle("active",x===b));}));
+  document.querySelectorAll(".side-toggle button").forEach(b=>b.addEventListener("click",updateOrderPreview));
+  $("paperMode").addEventListener("change",()=>{updatePaperMode();updateOrderPreview();}); $("paperQty").addEventListener("input",updateOrderPreview);
+  document.querySelectorAll(".quick-values button").forEach(b=>b.addEventListener("click",()=>{$("paperMode").value="notional";updatePaperMode();$("paperQty").value=b.dataset.value;updateOrderPreview();}));
   $("paperForm").addEventListener("submit",submitPaper); $("alertForm").addEventListener("submit",submitAlert); $("journalForm").addEventListener("submit",submitJournal); $("aiForm").addEventListener("submit",saveAi); $("removeAi").addEventListener("click",removeAi); $("aiRead").addEventListener("click",readAi);
+  $("openSettings").addEventListener("click",()=>{$("settingsModal").classList.add("open");$("settingsModal").setAttribute("aria-hidden","false");}); $("closeSettings").addEventListener("click",closeSettings); $("settingsModal").addEventListener("click",e=>{if(e.target===$("settingsModal"))closeSettings();});
+  $("themeGrid").addEventListener("click",e=>{const b=e.target.closest("[data-theme]");if(!b)return;savePreference("theme",b.dataset.theme);applyPreferences();});
+  $("uiScale").addEventListener("change",e=>{savePreference("scale",e.target.value);applyPreferences();}); $("reduceMotion").addEventListener("change",e=>{savePreference("reduceMotion",e.target.checked);applyPreferences();});
+  $("copyDemo").addEventListener("click",copyDemoPlan);
   window.addEventListener("resize",()=>requestAnimationFrame(drawChart));
 }
+
+function closeSettings(){$("settingsModal").classList.remove("open");$("settingsModal").setAttribute("aria-hidden","true");}
+function savePreference(key,value){const prefs=JSON.parse(localStorage.getItem("dieftrade.preferences")||"{}");prefs[key]=value;localStorage.setItem("dieftrade.preferences",JSON.stringify(prefs));}
+function applyPreferences(){let prefs={};try{prefs=JSON.parse(localStorage.getItem("dieftrade.preferences")||"{}");}catch{}const theme=prefs.theme||"dief",scale=prefs.scale||"normal";document.body.dataset.theme=theme;document.body.dataset.scale=scale;document.body.classList.toggle("reduce-motion",Boolean(prefs.reduceMotion));if($("themeGrid"))document.querySelectorAll(".theme-choice").forEach(x=>x.classList.toggle("active",x.dataset.theme===theme));if($("uiScale"))$("uiScale").value=scale;if($("reduceMotion"))$("reduceMotion").checked=Boolean(prefs.reduceMotion);setTimeout(drawChart,30);}
 
 async function refreshCoins(){ try{state.coins=await api("/api/coins?limit=220");renderCoins();}catch{} }
 function renderCoins(){
@@ -57,6 +69,7 @@ function connectStream(){
   state.eventSource?.close(); const es=new EventSource(`/api/live/stream?t=${encodeURIComponent(state.token)}`); state.eventSource=es;
   es.addEventListener("ready",()=>setConnection(true,"mercado ao vivo"));
   for(const type of ["snapshot","market"]) es.addEventListener(type,(event)=>{try{state.live=JSON.parse(event.data);renderLive();}catch{}});
+  es.addEventListener("coins",event=>{try{state.coins=JSON.parse(event.data);renderCoins();}catch{}});
   es.onerror=()=>setConnection(false,"reconectando…");
 }
 function renderLive(){
@@ -66,7 +79,9 @@ function renderLive(){
   const ratio=Number(l.flow?.buyRatio); $("buyRatio").textContent=Number.isFinite(ratio)?`${(ratio*100).toFixed(1)}%`:"--"; $("buySplit").style.width=`${(Number.isFinite(ratio)?ratio:.5)*100}%`;
   const imb=Number(l.book?.imbalance); $("imbalance").textContent=Number.isFinite(imb)?`${(imb*100).toFixed(1)}%`:"--"; $("bookSplit").style.width=`${(Number.isFinite(imb)?imb:.5)*100}%`;
   $("spread").textContent=pct(l.ticker?.spreadPct,4); $("delta").textContent=`Delta: ${fmt(l.flow?.delta,4)}`; renderBook(l.book);renderTape(l.trades);
+  mergeLiveCandle(l.candle);
 }
+function mergeLiveCandle(candle){if(!candle||!state.analysis?.series?.candles?.length)return;const rows=state.analysis.series.candles,last=rows.at(-1);if(Number(last.t)===Number(candle.t))rows[rows.length-1]={...last,...candle};else if(Number(candle.t)>Number(last.t)){rows.push(candle);if(rows.length>260)rows.shift();}if(state.chartFrame)cancelAnimationFrame(state.chartFrame);state.chartFrame=requestAnimationFrame(drawChart);}
 function renderBook(book={}){
   const side=(rows,kind)=>{const max=Math.max(...(rows||[]).map(x=>x[1]),1);return `<div class="book-side ${kind}">${(rows||[]).slice(0,12).map(([p,q])=>`<div class="book-row" style="--depth:${Math.max(4,q/max*100)}%"><span class="${kind==="ask"?"negative":"positive"}">${fmt(p,8)}</span><span>${fmt(q,5)}</span></div>`).join("")}</div>`};
   $("book").innerHTML=side(book.bids,"bid")+side(book.asks,"ask");
@@ -84,8 +99,10 @@ function renderAnalysis(){
   const labels={rsi:"RSI 14",macdHistogram:"MACD hist.",adx:"ADX",atrPct:"ATR %",volumeRatio:"Volume",stochasticK:"Estocástico K",ema9:"EMA 9",ema20:"EMA 20",ema50:"EMA 50",ema200:"EMA 200",vwap:"VWAP",roc:"ROC"};
   $("indicators").innerHTML=Object.entries(labels).map(([k,l])=>`<div class="data-item"><span>${l}</span><b>${fmt(a.indicators?.[k],k.includes("ema")||k==="vwap"?8:3)}</b></div>`).join("");
   $("warnings").innerHTML=(a.warnings||[]).map(w=>`<p>• ${esc(w)}</p>`).join("")||"<p>• Nenhum aviso automático adicional; risco de mercado continua existindo.</p>";
-  $("staleBadge").textContent=state.live?.stale?"ATRASADO":"AO VIVO"; renderPlan(a.plan);renderLevels(a.levels);drawChart();
+  $("staleBadge").textContent=state.live?.stale?"ATRASADO":"AO VIVO"; renderPlan(a.plan);renderLevels(a.levels);updatePixel();updateDemoTicket();updateOrderPreview();drawChart();
 }
+function updatePixel(){const signal=state.analysis?.signal||"AGUARDE",pixel=$("pixel");pixel.className=`pixel-wrap ${signal==="COMPRA"?"mood-up":signal==="VENDA"?"mood-down":"mood-flat"}`;$("pixelTip").textContent=signal==="COMPRA"?"hum… compradores acordaram":signal==="VENDA"?"cuidado, pressão vendedora":"mercado pensando; eu também";}
+function updateDemoTicket(){$("demoSymbol").textContent=state.symbol.replace("USDT","/USDT");$("demoSignal").textContent=state.analysis?.signal||"AGUARDE";$("demoSignal").className=state.analysis?.signal==="COMPRA"?"positive":state.analysis?.signal==="VENDA"?"negative":"";$("demoPrice").textContent=priceFormat(state.live?.ticker?.last||state.analysis?.price);}
 function renderPlan(p){$("riskPlan").innerHTML=p?[["Entrada",p.entry],["Stop técnico",p.stop],["Alvo 1",p.target1],["Alvo 2",p.target2],["Risco/retorno",`1:${p.riskReward2}`],["Qtd. ref.",p.suggestedQuantity]].map(([l,v])=>`<div class="risk-card"><span>${l}</span><b>${fmt(v,8)}</b></div>`).join(""):`<p class="legal">Sinal em espera: não há plano de entrada até existir confluência suficiente.</p>`;}
 function renderLevels(levels={}){const group=(title,rows,cls)=>`<div class="level-group"><h3 class="${cls}">${title}</h3>${(rows||[]).map(x=>`<div class="level-row"><span>${fmt(x.price,8)}</span><small>${x.touches} toques</small></div>`).join("")||"<small>Sem nível forte próximo.</small>"}</div>`;$("levels").innerHTML=group("SUPORTES",levels.supports,"positive")+group("RESISTÊNCIAS",levels.resistances,"negative");}
 
@@ -97,8 +114,12 @@ function drawChart(){
   const drawLine=(values,color)=>{const arr=values.slice(-count);ctx.strokeStyle=color;ctx.lineWidth=1.25;ctx.beginPath();let started=false;arr.forEach((v,i)=>{if(!Number.isFinite(v))return;const xx=x(i),yy=y(v);if(!started){ctx.moveTo(xx,yy);started=true}else ctx.lineTo(xx,yy)});ctx.stroke()};drawLine(a.series.ema9,"#ffcb52");drawLine(a.series.ema20,"#35e083");drawLine(a.series.ema50,"#6b8cff");drawLine(a.series.vwap,"#ca6bff");
 }
 
-async function submitPaper(e){e.preventDefault();try{const out=await api("/api/paper/order",{method:"POST",body:JSON.stringify({symbol:state.symbol,side:state.side,quantity:Number($("paperQty").value),note:$("paperNote").value})});state.paper=out.portfolio;renderPaper();$("paperMessage").textContent="Ordem simulada executada.";toast("Simulação registrada");}catch(error){$("paperMessage").textContent=error.message;}}
-function renderPaper(){const p=state.paper;if(!p)return;$("cash").textContent=money(p.cash);$("equity").textContent=money(p.equity);$("paperReturn").textContent=pct(p.totalReturn);$("paperReturn").className=p.totalReturn>=0?"positive":"negative";$("realized").textContent=money(p.realized);$("positions").innerHTML=(p.positions||[]).map(x=>`<div class="list-row"><span><b>${esc(x.symbol)}</b><small> ${fmt(x.quantity,8)} @ ${fmt(x.average,8)}</small></span><b class="${x.unrealized>=0?"positive":"negative"}">${money(x.unrealized)}</b></div>`).join("")||`<p class="legal">Nenhuma posição simulada.</p>`;$("trades").innerHTML=(p.trades||[]).slice(0,12).map(t=>`<div class="list-row"><span><b class="${t.side==="buy"?"positive":"negative"}">${t.side==="buy"?"COMPRA":"VENDA"}</b> ${esc(t.symbol)}</span><small>${fmt(t.quantity,8)} @ ${fmt(t.price,8)}</small></div>`).join("");}
+function paperPrice(){return Number(state.live?.ticker?.last||state.analysis?.price);}
+function paperQuantity(){const entered=Number($("paperQty").value),price=paperPrice();return $("paperMode").value==="notional"?(price>0?entered/price:0):entered;}
+function updatePaperMode(){$("paperValueLabel").firstChild.textContent=$("paperMode").value==="notional"?"Valor em USDT":"Quantidade da moeda";$("paperQty").placeholder=$("paperMode").value==="notional"?"100,00":"0.001";}
+function updateOrderPreview(){if(!$("orderPreview"))return;const value=Number($("paperQty").value),q=paperQuantity(),price=paperPrice();if(!(value>0)||!(price>0)){$("orderPreview").textContent=state.side==="buy"?"Comprar abre uma posição usando o saldo virtual.":"Vender fecha uma posição virtual já comprada.";return;}$("orderPreview").textContent=state.side==="buy"?`Compra virtual de ${fmt(q,8)} ${state.symbol.replace("USDT","")} por aproximadamente ${money(q*price)}.`:`Venda virtual de ${fmt(q,8)} ${state.symbol.replace("USDT","")}. É preciso possuir essa quantidade no simulador.`;}
+async function submitPaper(e){e.preventDefault();const quantity=paperQuantity(),price=paperPrice();$("paperMessage").textContent="";try{if(!(quantity>0)||!(price>0))throw new Error("Informe um valor positivo e aguarde o preço ao vivo.");const position=state.paper?.positions?.find(x=>x.symbol===state.symbol);if(state.side==="sell"&&!position)throw new Error("Você ainda não possui essa moeda no simulador. Primeiro use Comprar / abrir.");if(state.side==="sell"&&quantity>position.quantity+1e-12)throw new Error(`Você possui somente ${fmt(position.quantity,8)} ${state.symbol.replace("USDT","")}.`);if(state.side==="buy"&&quantity*price>(state.paper?.cash||0))throw new Error(`Saldo virtual insuficiente. Disponível: ${money(state.paper?.cash||0)}.`);const out=await api("/api/paper/order",{method:"POST",body:JSON.stringify({symbol:state.symbol,side:state.side,quantity,note:$("paperNote").value})});state.paper=out.portfolio;renderPaper();$("paperMessage").textContent="Ordem simulada executada.";toast("Simulação registrada");}catch(error){$("paperMessage").textContent=error.message;toast(error.message,true);}}
+function renderPaper(){const p=state.paper;if(!p)return;$("cash").textContent=money(p.cash);$("equity").textContent=money(p.equity);$("paperReturn").textContent=pct(p.totalReturn);$("paperReturn").className=p.totalReturn>=0?"positive":"negative";$("realized").textContent=money(p.realized);$("positions").innerHTML=(p.positions||[]).map(x=>`<div class="list-row"><span><b>${esc(x.symbol)}</b><small> ${fmt(x.quantity,8)} @ ${fmt(x.average,8)}</small><br><small class="${x.unrealized>=0?"positive":"negative"}">${money(x.unrealized)}</small></span><button class="danger close-position" data-close="${esc(x.symbol)}" data-quantity="${x.quantity}">Fechar</button></div>`).join("")||`<p class="legal">Nenhuma posição simulada. Use “Comprar / abrir” para começar.</p>`;$("positions").querySelectorAll("[data-close]").forEach(b=>b.onclick=()=>{state.symbol=b.dataset.close;state.side="sell";$("paperMode").value="quantity";updatePaperMode();$("paperQty").value=b.dataset.quantity;document.querySelectorAll(".side-toggle button").forEach(x=>x.classList.toggle("active",x.dataset.side==="sell"));updateOrderPreview();});$("trades").innerHTML=(p.trades||[]).slice(0,12).map(t=>`<div class="list-row"><span><b class="${t.side==="buy"?"positive":"negative"}">${t.side==="buy"?"COMPRA":"VENDA"}</b> ${esc(t.symbol)}</span><small>${fmt(t.quantity,8)} @ ${fmt(t.price,8)}</small></div>`).join("");}
 async function submitAlert(e){e.preventDefault();try{const item=await api("/api/alerts",{method:"POST",body:JSON.stringify({symbol:state.symbol,kind:$("alertKind").value,value:Number($("alertValue").value),note:$("alertNote").value})});state.alerts.unshift(item);renderAlerts();toast("Alerta criado");}catch(error){toast(error.message,true);}}
 function renderAlerts(){$("alertsList").innerHTML=state.alerts.map(a=>`<div class="list-row"><span><b>${esc(a.symbol)}</b><small> ${a.kind==="price_gte"?"≥":"≤"} ${fmt(a.value,8)}</small></span><button class="danger" data-alert="${a.id}">×</button></div>`).join("");$("alertsList").querySelectorAll("[data-alert]").forEach(b=>b.onclick=async()=>{await api(`/api/alerts/${b.dataset.alert}`,{method:"DELETE"});state.alerts=state.alerts.filter(x=>x.id!==b.dataset.alert);renderAlerts();});}
 async function submitJournal(e){e.preventDefault();try{const item=await api("/api/journal",{method:"POST",body:JSON.stringify({symbol:state.symbol,interval:state.interval,setup:$("journalSetup").value,note:$("journalNote").value,side:"observe"})});state.journal.unshift(item);renderJournal();toast("Anotação salva");}catch(error){toast(error.message,true);}}
@@ -107,5 +128,6 @@ async function saveAi(e){e.preventDefault();try{const key=$("aiKey").value.trim(
 async function removeAi(){try{await api("/api/ai/config",{method:"DELETE"});$("aiStatus").textContent="Chave removida.";toast("Chave de IA removida");}catch(error){toast(error.message,true);}}
 async function readAi(){const b=$("aiRead");b.disabled=true;$("aiResult").textContent="Gerando uma leitura complementar sem enviar ordens…";try{const out=await api("/api/ai/read",{method:"POST",body:JSON.stringify({symbol:state.symbol,interval:state.interval})});$("aiResult").textContent=formatAi(out);}catch(error){$("aiResult").textContent=error.message;}finally{b.disabled=false;}}
 function formatAi(v){if(typeof v==="string")return v;const lines=[];for(const [k,val] of Object.entries(v||{}))lines.push(`${k.replace(/_/g," ").toUpperCase()}: ${Array.isArray(val)?val.join(" · "):typeof val==="object"?JSON.stringify(val):val}`);return lines.join("\n\n");}
+async function copyDemoPlan(){const a=state.analysis,margin=Number($("demoMargin").value)||10;const text=[`DiefTrade · ${state.symbol.replace("USDT","/USDT")} · ${state.interval}`,`Leitura: ${a?.signal||"AGUARDE"} | Score: ${a?.score??"--"} | Confluência: ${a?.confidence??"--"}%`,`Preço observado: ${priceFormat(state.live?.ticker?.last||a?.price)}`,a?.plan?`Entrada: ${a.plan.entry} | Stop: ${a.plan.stop} | Alvo 1: ${a.plan.target1} | Alvo 2: ${a.plan.target2}`:"Sem plano de entrada no momento.",`Margem de treino escolhida: $${margin}`,"CONFIRME MANUALMENTE QUE A CONTA DEMO ESTÁ ATIVA. Não é recomendação financeira."].join("\n");try{await navigator.clipboard.writeText(text);toast("Plano de treino copiado");}catch{toast("Não foi possível copiar automaticamente",true);}}
 
 bootstrap();

@@ -117,7 +117,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (!authorize(req, url)) return fail(res, 401, "Sessão local inválida.");
     const pathname = url.pathname;
     if (pathname === "/api/health") return json(res, 200, {
-      ok: true, version: "0.2.0", live: live.snapshot(), market: marketClient.status(), ai: credentialStore.status(),
+      ok: true, version: "0.3.0", live: live.snapshot(), market: marketClient.status(), ai: credentialStore.status(),
       safety: { realOrders: false, publicMarketDataOnly: true },
     });
     if (pathname === "/api/bootstrap") {

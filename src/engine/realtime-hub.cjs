@@ -22,6 +22,7 @@ class RealtimeHub extends EventEmitter {
     this.closed = false;
     this.state = this.#blankState();
     this.market = new Map();
+    this.lastMarketBroadcast = 0;
     this.clients = new Set();
     this.flushTimer = setInterval(() => this.#flush(), 250);
     this.staleTimer = setInterval(() => this.#markStale(), 1000);
@@ -101,6 +102,13 @@ class RealtimeHub extends EventEmitter {
           });
         });
         this.emit("market", this.marketSnapshot());
+        if (Date.now() - this.lastMarketBroadcast > 750) {
+          this.lastMarketBroadcast = Date.now();
+          const event = { type: "coins", data: this.marketSnapshot(220) };
+          for (const send of this.clients) {
+            try { send(event); } catch { this.clients.delete(send); }
+          }
+        }
       } catch {}
     });
     socket.on("close", () => {

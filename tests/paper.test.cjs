@@ -19,3 +19,11 @@ test("paper trading compra e vende sem tocar conta real", () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("venda sem posição mostra erro em vez de criar short acidental", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dieftrade-paper-"));
+  try {
+    const p = new PaperPortfolio(dir);
+    assert.throws(() => p.order({ symbol: "ETHUSDT", side: "sell", quantity: 1, price: 2000 }), /Posição simulada insuficiente/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+

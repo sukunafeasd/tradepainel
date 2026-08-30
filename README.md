@@ -14,6 +14,10 @@ Assistente desktop de leitura de mercado e **paper trading** para day trade de c
 - simulador local com saldo, posições, taxas e histórico;
 - alertas de preço e diário do trader;
 - leitura complementar opcional pela OpenAI.
+- cinco temas, escala de interface e redução de animações;
+- Pixel, o pato trader original, reagindo ao sinal do mercado;
+- scanner e vela atual atualizados continuamente por WebSocket;
+- espelho de operação para treino externo, sempre com confirmação manual.
 
 ## Princípios
 

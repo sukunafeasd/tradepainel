@@ -58,7 +58,14 @@ class AiReader {
     });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      throw new Error(`A IA respondeu HTTP ${response.status}${body ? ` — ${body.slice(0, 220)}` : ""}`);
+      let detail = "";
+      try { detail = JSON.parse(body)?.error?.message || ""; } catch {}
+      if (response.status === 429 && /no credits|insufficient_quota|quota/i.test(`${detail} ${body}`)) {
+        throw new Error("A chave foi reconhecida, mas a conta da API está sem créditos. Adicione créditos na cobrança da OpenAI e tente novamente.");
+      }
+      if (response.status === 401) throw new Error("A OpenAI recusou a chave. Crie uma chave nova e salve novamente.");
+      if (response.status === 403) throw new Error("Essa chave não tem permissão para usar o modelo selecionado.");
+      throw new Error(`A IA respondeu HTTP ${response.status}${detail ? ` — ${detail.slice(0, 180)}` : ""}`);
     }
     const json = await response.json();
     return { mode: "openai", model, content: parseJson(extractText(json)), requestId: response.headers.get("x-request-id") || null };
