@@ -10,6 +10,7 @@ const { analyze, combineTimeframes } = require("./engine/analysis.cjs");
 const { AlertsStore, JournalStore } = require("./engine/paper.cjs");
 const { ExpirySimulator } = require("./engine/expiry-simulator.cjs");
 const { AiReader } = require("./engine/ai-reader.cjs");
+const { AdaptiveCalibrator } = require("./engine/adaptive-calibration.cjs");
 
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -27,7 +28,8 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   const token = crypto.randomBytes(32).toString("base64url");
   const marketClient = market || new MarketClient();
   const live = realtime || new RealtimeHub();
-  const paper = new ExpirySimulator(dataDirectory);
+  const calibrator = new AdaptiveCalibrator(dataDirectory);
+  const paper = new ExpirySimulator(dataDirectory, { onSettled: (trades) => { calibrator.recordSettled(trades); analysisCache.clear(); } });
   const alerts = new AlertsStore(dataDirectory);
   const journal = new JournalStore(dataDirectory);
   const ai = new AiReader(credentialStore);
@@ -48,6 +50,11 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     const body = JSON.stringify(value);
     res.writeHead(status, { ...securityHeaders("application/json; charset=utf-8"), "Content-Length": Buffer.byteLength(body) });
     res.end(body);
+  };
+  const text = (res, status, value, contentType = "text/plain; charset=utf-8", extraHeaders = {}) => {
+    const payload = String(value);
+    res.writeHead(status, { ...securityHeaders(contentType), ...extraHeaders, "Content-Length": Buffer.byteLength(payload) });
+    res.end(payload);
   };
   const fail = (res, status, error) => json(res, status, { error: error instanceof Error ? error.message : String(error) });
 
@@ -92,8 +99,10 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     const cached = analysisCache.get(key);
     if (!force && cached && Date.now() - cached.at < 4000) return cached.value;
     const candles = await marketClient.klines(symbol, interval, 500);
-    const value = analyze(candles, { symbol, interval, micro: symbol === live.symbol ? microSnapshot() : {} });
+    const value = analyze(candles, { symbol, interval, micro: symbol === live.symbol ? microSnapshot() : {}, calibration: calibrator.profile({ symbol, interval }) });
     analysisCache.set(key, { at: Date.now(), value });
+    const analysisHits = alerts.checkAnalysis(value);
+    analysisHits.forEach((alert) => live.publish?.("alert", alert));
     return value;
   };
 
@@ -118,13 +127,13 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (!authorize(req, url)) return fail(res, 401, "Sessão local inválida.");
     const pathname = url.pathname;
     if (pathname === "/api/health") return json(res, 200, {
-      ok: true, version: "0.4.0", live: live.snapshot(), market: marketClient.status(), ai: credentialStore.status(),
+      ok: true, version: "0.5.0", uptimeSeconds: Math.round(process.uptime()), live: live.snapshot(), market: marketClient.status(), ai: credentialStore.status(), calibration: calibrator.status(), memory: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) },
       safety: { realOrders: false, publicMarketDataOnly: true },
     });
     if (pathname === "/api/bootstrap") {
       let coins = live.marketSnapshot();
       if (coins.length < 20) coins = await marketClient.topPairs();
-      return json(res, 200, { coins, selected: { symbol: live.symbol, interval: live.interval }, paper: paper.snapshot(prices()), alerts: alerts.list(), journal: journal.list().slice(0, 100), ai: credentialStore.status() });
+      return json(res, 200, { coins, selected: { symbol: live.symbol, interval: live.interval }, paper: paper.snapshot(prices()), alerts: alerts.list(), journal: journal.list().slice(0, 100), ai: credentialStore.status(), calibration: calibrator.status() });
     }
     if (pathname === "/api/coins") {
       let coins = live.marketSnapshot(Number(url.searchParams.get("limit")) || 180);
@@ -167,10 +176,24 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       const input = await body(req);
       const symbol = cleanSymbol(input.symbol);
       const currentPrice = prices()[symbol] || (await marketClient.ticker(symbol)).last;
-      return json(res, 200, { trade: paper.place({ ...input, symbol, entryPrice: currentPrice }), portfolio: paper.snapshot(prices()) });
+      const interval = INTERVALS.has(input.interval) ? input.interval : live.interval;
+      let reading = null;
+      try { reading = await getAnalysis(symbol, interval, true); } catch {}
+      return json(res, 200, { trade: paper.place({ ...input, symbol, interval, entryPrice: currentPrice, analysisSnapshot: AdaptiveCalibrator.snapshot(reading) }), portfolio: paper.snapshot(prices()) });
     }
     if (pathname === "/api/paper/reset" && req.method === "POST") {
       return json(res, 200, paper.reset(10000));
+    }
+    if (pathname === "/api/paper/settings" && req.method === "POST") {
+      paper.settings(await body(req));
+      return json(res, 200, paper.snapshot(prices()));
+    }
+    if (pathname === "/api/paper/export" && req.method === "GET") {
+      const rows = paper.snapshot(prices()).results.slice().reverse();
+      const quote = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+      const header = ["abertura", "fechamento", "par", "tempo", "direcao", "valor", "entrada", "saida", "resultado", "lucro", "sinal_painel", "confianca"];
+      const lines = rows.map((trade) => [trade.openedAt, trade.closedAt, trade.symbol, trade.interval, trade.direction, trade.stake, trade.entryPrice, trade.exitPrice, trade.result, trade.profit, trade.analysisSnapshot?.signal, trade.analysisSnapshot?.confidence].map(quote).join(","));
+      return text(res, 200, `\uFEFF${header.join(",")}\n${lines.join("\n")}`, "text/csv; charset=utf-8", { "Content-Disposition": "attachment; filename=historico-dieftrade.csv" });
     }
     if (pathname === "/api/alerts" && req.method === "GET") return json(res, 200, alerts.list());
     if (pathname === "/api/alerts" && req.method === "POST") return json(res, 200, alerts.add(await body(req)));
@@ -181,6 +204,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (pathname === "/api/ai/config" && req.method === "GET") return json(res, 200, credentialStore.status());
     if (pathname === "/api/ai/config" && req.method === "POST") return json(res, 200, credentialStore.save(await body(req)));
     if (pathname === "/api/ai/config" && req.method === "DELETE") return json(res, 200, credentialStore.remove());
+    if (pathname === "/api/ai/test" && req.method === "POST") return json(res, 200, await ai.diagnose());
     if (pathname === "/api/ai/read" && req.method === "POST") {
       const input = await body(req);
       const symbol = cleanSymbol(input.symbol || live.symbol);
@@ -189,6 +213,8 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       analysis.multiTimeframe = await getConfluence(symbol);
       return json(res, 200, await ai.read(analysis));
     }
+    if (pathname === "/api/calibration" && req.method === "GET") return json(res, 200, calibrator.status());
+    if (pathname === "/api/calibration/reset" && req.method === "POST") { analysisCache.clear(); return json(res, 200, calibrator.reset()); }
     return fail(res, 404, "Rota não encontrada.");
   }
 
@@ -215,7 +241,11 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     }
   });
 
-  const stateTimer = setInterval(() => { const current = prices(); alerts.check(current); paper.settle(current); }, 250);
+  const stateTimer = setInterval(() => {
+    const current = prices();
+    alerts.check(current).forEach((alert) => live.publish?.("alert", alert));
+    paper.settle(current);
+  }, 250);
   stateTimer.unref();
 
   return {

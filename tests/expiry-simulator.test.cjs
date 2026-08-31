@@ -32,3 +32,17 @@ test("simulador resolve baixa perdedora e restaura US$ 10 mil", () => {
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 });
 
+test("simulador calcula expectativa, drawdown e curva de patrimônio", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dieftrade-expiry-stats-"));
+  try {
+    const sim = new ExpirySimulator(dir);
+    let trade = sim.place({ symbol:"BTCUSDT", direction:"up", stake:100, entryPrice:100, durationMs:5000 });
+    sim.snapshot({ BTCUSDT:101 }, trade.expiresAt + 1);
+    trade = sim.place({ symbol:"BTCUSDT", direction:"up", stake:100, entryPrice:100, durationMs:5000 });
+    const snap = sim.snapshot({ BTCUSDT:99 }, trade.expiresAt + 1);
+    assert.equal(snap.total, 2);
+    assert.ok(Number.isFinite(snap.expectancy));
+    assert.ok(snap.maxDrawdown > 0);
+    assert.equal(snap.equityCurve.length, 3);
+  } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+.codex-tmp/
 .env
 .env.*
 *.log
@@ -8,4 +9,3 @@ coverage/
 *.bak
 .DS_Store
 Thumbs.db
-

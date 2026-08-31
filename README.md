@@ -41,3 +41,12 @@ pnpm build
 ```
 
 O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
+## Versão 0.5.0
+
+- Chaves Gemini Auth (`AQ.`) e padrão aceitas, sempre criptografadas pelo Windows.
+- Diagnóstico separado de chave, projeto, modelo, permissão e latência.
+- Calibração adaptativa local com prior estatístico e limites contra sobreajuste.
+- Simulador com fator de lucro, expectativa, drawdown, sequências, curva de patrimônio e exportação CSV.
+- Gráfico com níveis técnicos automáticos, linhas horizontais e tendências persistentes por par.
+- Alertas de preço, sinal e confluência com aviso visual e sonoro local.
+- Painel de saúde para fluxo ao vivo, failover, latência, IA e memória.

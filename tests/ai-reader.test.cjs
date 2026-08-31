@@ -38,3 +38,21 @@ test("Gemini usa o endpoint, cabeçalho e resposta corretos", async () => {
     assert.equal(result.content.veredito, "AGUARDE");
   } finally { global.fetch = original; }
 });
+
+test("diagnóstico Gemini confirma modelo sem revelar a chave", async () => {
+  const original = global.fetch;
+  let request;
+  global.fetch = async (url, options) => {
+    request = { url, options };
+    return { ok: true, status: 200, json: async () => ({ name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", supportedGenerationMethods: ["generateContent"] }) };
+  };
+  try {
+    const reader = new AiReader({ load: () => ({ apiKey: "AQ." + "x".repeat(32), provider: "gemini", model: "gemini-2.5-flash" }) });
+    const result = await reader.diagnose();
+    assert.equal(result.ok, true);
+    assert.equal(result.supportsGenerateContent, true);
+    assert.match(request.url, /models\/gemini-2.5-flash/);
+    assert.equal(request.options.headers["x-goog-api-key"], "AQ." + "x".repeat(32));
+    assert.doesNotMatch(JSON.stringify(result), /AQ\./);
+  } finally { global.fetch = original; }
+});

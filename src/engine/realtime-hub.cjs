@@ -24,6 +24,7 @@ class RealtimeHub extends EventEmitter {
     this.market = new Map();
     this.lastMarketBroadcast = 0;
     this.clients = new Set();
+    this.metrics = { reconnects: 0, connectedAt: null, lastDisconnectAt: null, lastError: null, host: null };
     this.flushTimer = setInterval(() => this.#flush(), 250);
     this.staleTimer = setInterval(() => this.#markStale(), 1000);
     this.flushTimer.unref();
@@ -65,7 +66,7 @@ class RealtimeHub extends EventEmitter {
 
   snapshot() {
     const { dirty, ...safe } = this.state;
-    return JSON.parse(JSON.stringify(safe));
+    return JSON.parse(JSON.stringify({ ...safe, connection: this.metrics }));
   }
 
   marketSnapshot(limit = 180) {
@@ -78,6 +79,13 @@ class RealtimeHub extends EventEmitter {
     this.clients.add(send);
     send({ type: "snapshot", data: this.snapshot() });
     return () => this.clients.delete(send);
+  }
+
+  publish(type, data) {
+    const event = { type, data };
+    for (const send of this.clients) {
+      try { send(event); } catch { this.clients.delete(send); }
+    }
   }
 
   #connectMarket() {
@@ -114,7 +122,7 @@ class RealtimeHub extends EventEmitter {
     socket.on("close", () => {
       if (!this.closed) setTimeout(() => this.#connectMarket(), 2500 + Math.random() * 1500);
     });
-    socket.on("error", () => socket.terminate());
+    socket.on("error", (error) => { this.metrics.lastError = error?.message || "Falha no radar ao vivo"; socket.terminate(); });
   }
 
   #connectSymbol() {
@@ -131,6 +139,9 @@ class RealtimeHub extends EventEmitter {
     this.socket = socket;
     socket.on("open", () => {
       this.retry = 0;
+      this.metrics.connectedAt = Date.now();
+      this.metrics.host = this.streamHosts[this.hostIndex % this.streamHosts.length];
+      this.metrics.lastError = null;
       this.state.connected = true;
       this.state.stale = false;
       this.state.dirty = true;
@@ -141,13 +152,15 @@ class RealtimeHub extends EventEmitter {
       this.state.connected = false;
       this.state.stale = true;
       this.state.dirty = true;
+      this.metrics.reconnects += 1;
+      this.metrics.lastDisconnectAt = Date.now();
       if (!this.closed) {
         this.hostIndex = (this.hostIndex + 1) % this.streamHosts.length;
         const delay = Math.min(15000, 800 * (2 ** Math.min(this.retry++, 4))) + Math.random() * 500;
         setTimeout(() => this.#connectSymbol(), delay);
       }
     });
-    socket.on("error", () => socket.terminate());
+    socket.on("error", (error) => { this.metrics.lastError = error?.message || "Falha no fluxo ao vivo"; socket.terminate(); });
   }
 
   #handleMessage(raw) {

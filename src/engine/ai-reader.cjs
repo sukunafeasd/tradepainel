@@ -18,6 +18,28 @@ function extractGeminiText(response) {
   return (response.candidates || []).flatMap((candidate) => candidate.content?.parts || []).map((part) => part.text).filter((text) => typeof text === "string").join("\n");
 }
 
+function providerError({ provider, model, status, body = "" }) {
+  const gemini = provider === "gemini";
+  let detail = "";
+  let reason = "";
+  try {
+    const parsed = JSON.parse(body);
+    detail = parsed?.error?.message || "";
+    reason = parsed?.error?.details?.flatMap((item) => item.reason || item.metadata?.reason || []).join(" ") || parsed?.error?.status || "";
+  } catch {}
+  const evidence = `${detail} ${reason} ${body}`;
+  if (status === 429) return gemini
+    ? new Error("A chave Gemini foi aceita, mas a cota ou o limite temporário do projeto foi atingido.")
+    : new Error(/no credits|insufficient_quota|quota/i.test(evidence) ? "A chave foi reconhecida, mas a conta da API está sem créditos." : "A OpenAI atingiu o limite temporário. Aguarde e tente novamente.");
+  if (gemini && status === 400 && /api key|API_KEY_INVALID|invalid.*key/i.test(evidence)) return new Error("O Gemini recusou a chave. Crie uma chave Auth nova no Google AI Studio e confirme que ela pertence ao projeto selecionado.");
+  if (status === 401) return new Error(`${gemini ? "O Gemini" : "A OpenAI"} recusou a autenticação. Gere uma chave nova e salve novamente.`);
+  if (status === 403) return new Error(/leak|blocked|reported/i.test(evidence)
+    ? "A chave foi bloqueada pelo provedor por segurança. Revogue-a e gere uma nova."
+    : `A chave não tem permissão para usar o modelo ${model}. Confira o projeto e as restrições da API.`);
+  if (status === 404) return new Error(`O modelo ${model} não foi encontrado ou não está liberado para esse projeto.`);
+  return new Error(`A IA respondeu HTTP ${status}${detail ? ` — ${detail.slice(0, 220)}` : ""}`);
+}
+
 class AiReader {
   constructor(credentialStore) {
     this.credentials = credentialStore;
@@ -45,13 +67,16 @@ class AiReader {
       micro: payload.micro || {},
       multiTimeframe: payload.multiTimeframe || null,
       plan: payload.plan || null,
+      dataQuality: payload.dataQuality || null,
+      calibration: payload.calibration || null,
     };
     const instructions = [
       "Você é o Dief, assistente técnico de day trade de criptomoedas.",
       "Use somente os números do JSON fornecido. Não invente notícias, preços, probabilidades ou certeza.",
       "Diferencie confluência técnica de chance real de lucro. Se os dados forem conflitantes, diga AGUARDE.",
       "Responda em português do Brasil, direto e profissional.",
-      "Retorne JSON válido com: veredito, resumo, contexto, confirmacoes (array), riscos (array), gatilho, invalidacao, gerenciamento.",
+      "Considere qualidade dos dados, alinhamento entre tempos e calibração histórica. Penalize conflito, atraso e pouca amostra.",
+      "Retorne JSON válido com: veredito, resumo, contexto, confirmacoes (array), conflitos (array), riscos (array), gatilho, invalidacao, gerenciamento.",
       "Nunca trate a análise como recomendação financeira e nunca instrua operação automática.",
     ].join(" ");
     const gemini = provider === "gemini";
@@ -69,22 +94,36 @@ class AiReader {
     });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      let detail = "";
-      try { detail = JSON.parse(body)?.error?.message || ""; } catch {}
-      if (gemini && response.status === 429) throw new Error("A API Gemini atingiu o limite temporário ou a cota do projeto. Aguarde ou confira a cota no Google AI Studio.");
-      if (!gemini && response.status === 429 && /no credits|insufficient_quota|quota/i.test(`${detail} ${body}`)) {
-        throw new Error("A chave foi reconhecida, mas a conta da API está sem créditos. Adicione créditos na cobrança da OpenAI e tente novamente.");
-      }
-      if (response.status === 400 && gemini && /api key|API_KEY_INVALID/i.test(`${detail} ${body}`)) throw new Error("O Gemini recusou a chave. Confira se ela pertence a um projeto com a Gemini API ativada.");
-      if (response.status === 401) throw new Error(`${gemini ? "O Gemini" : "A OpenAI"} recusou a chave. Crie uma chave nova e salve novamente.`);
-      if (response.status === 403) throw new Error(`A chave não tem permissão para usar o modelo ${model}.`);
-      throw new Error(`A IA respondeu HTTP ${response.status}${detail ? ` — ${detail.slice(0, 180)}` : ""}`);
+      throw providerError({ provider, model, status: response.status, body });
     }
     const json = await response.json();
     const content = parseJson(gemini ? extractGeminiText(json) : extractText(json));
     if (!Object.keys(content || {}).length) throw new Error("A IA não retornou uma leitura utilizável.");
     return { mode: gemini ? "gemini" : "openai", model, content, requestId: response.headers.get("x-request-id") || response.headers.get("x-guploader-uploadid") || null };
   }
+
+  async diagnose() {
+    const { apiKey, provider = "gemini", model } = this.credentials.load();
+    if (!apiKey) throw new Error("Configure uma chave de IA antes do diagnóstico.");
+    const started = performance.now();
+    if (provider === "gemini") {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || "gemini-2.5-flash")}`;
+      const response = await fetch(endpoint, { headers: { "x-goog-api-key": apiKey }, signal: AbortSignal.timeout(20000) });
+      if (!response.ok) throw providerError({ provider, model, status: response.status, body: await response.text().catch(() => "") });
+      const data = await response.json();
+      return {
+        ok: true,
+        provider,
+        model: String(data.name || model).replace(/^models\//, ""),
+        displayName: data.displayName || model,
+        latencyMs: Math.round(performance.now() - started),
+        supportsGenerateContent: (data.supportedGenerationMethods || []).includes("generateContent"),
+      };
+    }
+    const response = await fetch("https://api.openai.com/v1/models", { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(20000) });
+    if (!response.ok) throw providerError({ provider, model, status: response.status, body: await response.text().catch(() => "") });
+    return { ok: true, provider, model, latencyMs: Math.round(performance.now() - started), supportsGenerateContent: true };
+  }
 }
 
-module.exports = { AiReader, extractText, extractGeminiText, parseJson };
+module.exports = { AiReader, extractText, extractGeminiText, parseJson, providerError };

@@ -87,9 +87,12 @@ class AlertsStore {
   }
   list() { return [...this.store.value].sort((a, b) => b.createdAt - a.createdAt); }
   add({ symbol, kind, value, note = "" }) {
-    if (!["price_gte", "price_lte"].includes(kind)) throw new Error("Tipo de alerta inválido.");
-    if (!(Number(value) > 0)) throw new Error("Preço-alvo inválido.");
-    const alert = { id: id(), symbol: String(symbol).toUpperCase(), kind, value: Number(value), note: String(note).slice(0, 300), active: true, triggeredAt: null, hitPrice: null, createdAt: Date.now() };
+    const kinds = ["price_gte", "price_lte", "signal_buy", "signal_sell", "confidence_gte"];
+    if (!kinds.includes(kind)) throw new Error("Tipo de alerta inválido.");
+    const numericValue = Number(value);
+    if (["price_gte", "price_lte"].includes(kind) && !(numericValue > 0)) throw new Error("Preço-alvo inválido.");
+    if (kind === "confidence_gte" && !(numericValue >= 30 && numericValue <= 100)) throw new Error("A confluência precisa ficar entre 30% e 100%.");
+    const alert = { id: id(), symbol: String(symbol).toUpperCase(), kind, value: Number.isFinite(numericValue) ? numericValue : null, note: String(note).slice(0, 300), active: true, triggeredAt: null, hitPrice: null, createdAt: Date.now() };
     this.store.value.push(alert);
     this.store.save();
     return alert;
@@ -100,8 +103,29 @@ class AlertsStore {
     for (const alert of this.store.value) {
       if (!alert.active || !Number.isFinite(prices[alert.symbol])) continue;
       const price = prices[alert.symbol];
+      if (!["price_gte", "price_lte"].includes(alert.kind)) continue;
       const hit = alert.kind === "price_gte" ? price >= alert.value : price <= alert.value;
       if (hit) { alert.active = false; alert.triggeredAt = Date.now(); alert.hitPrice = price; hits.push(alert); }
+    }
+    if (hits.length) this.store.save();
+    return hits;
+  }
+  checkAnalysis(analysis) {
+    const hits = [];
+    for (const alert of this.store.value) {
+      if (!alert.active || alert.symbol !== analysis.symbol) continue;
+      const hit = alert.kind === "signal_buy" ? analysis.signal === "COMPRA"
+        : alert.kind === "signal_sell" ? analysis.signal === "VENDA"
+          : alert.kind === "confidence_gte" ? Number(analysis.confidence) >= Number(alert.value) && analysis.signal !== "AGUARDE"
+            : false;
+      if (hit) {
+        alert.active = false;
+        alert.triggeredAt = Date.now();
+        alert.hitPrice = analysis.price;
+        alert.hitSignal = analysis.signal;
+        alert.hitConfidence = analysis.confidence;
+        hits.push(alert);
+      }
     }
     if (hits.length) this.store.save();
     return hits;

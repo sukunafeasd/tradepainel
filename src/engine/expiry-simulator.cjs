@@ -6,10 +6,60 @@ const { JsonStore } = require("./storage.cjs");
 const id = () => crypto.randomBytes(8).toString("hex");
 const initial = () => ({ initialBalance: 10000, balance: 10000, payoutRate: 0.82, open: [], results: [], updatedAt: Date.now() });
 
-class ExpirySimulator {
-  constructor(dataDirectory) { this.store = new JsonStore(dataDirectory, "expiry-simulator.json", initial); }
+function statistics(data) {
+  const results = data.results || [];
+  const wins = results.filter((x) => x.result === "win");
+  const losses = results.filter((x) => x.result === "loss");
+  const draws = results.filter((x) => x.result === "draw");
+  const grossProfit = wins.reduce((sum, x) => sum + Math.max(0, Number(x.profit || 0)), 0);
+  const grossLoss = Math.abs(losses.reduce((sum, x) => sum + Math.min(0, Number(x.profit || 0)), 0));
+  const realized = results.reduce((sum, x) => sum + Number(x.profit || 0), 0);
+  const expectancy = results.length ? realized / results.length : 0;
+  const averageWin = wins.length ? grossProfit / wins.length : 0;
+  const averageLoss = losses.length ? grossLoss / losses.length : 0;
+  let equity = data.initialBalance;
+  let peak = equity;
+  let maxDrawdown = 0;
+  let streak = 0;
+  let bestStreak = 0;
+  let worstStreak = 0;
+  const equityCurve = [{ at: results[0]?.openedAt || data.updatedAt, value: Number(equity.toFixed(2)) }];
+  for (const trade of results) {
+    equity += Number(trade.profit || 0);
+    peak = Math.max(peak, equity);
+    maxDrawdown = Math.max(maxDrawdown, peak > 0 ? ((peak - equity) / peak) * 100 : 0);
+    streak = trade.result === "win" ? Math.max(1, streak + 1) : trade.result === "loss" ? Math.min(-1, streak - 1) : 0;
+    bestStreak = Math.max(bestStreak, streak);
+    worstStreak = Math.min(worstStreak, streak);
+    equityCurve.push({ at: trade.closedAt, value: Number(equity.toFixed(2)) });
+  }
+  return {
+    wins: wins.length,
+    losses: losses.length,
+    draws: draws.length,
+    total: results.length,
+    realized: Number(realized.toFixed(2)),
+    winRate: wins.length + losses.length ? (wins.length / (wins.length + losses.length)) * 100 : 0,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? null : 0,
+    expectancy: Number(expectancy.toFixed(2)),
+    averageWin: Number(averageWin.toFixed(2)),
+    averageLoss: Number(averageLoss.toFixed(2)),
+    payoff: averageLoss > 0 ? averageWin / averageLoss : null,
+    maxDrawdown: Number(maxDrawdown.toFixed(2)),
+    currentStreak: streak,
+    bestStreak,
+    worstStreak,
+    equityCurve: equityCurve.slice(-400),
+  };
+}
 
-  place({ symbol, direction, stake, entryPrice, durationMs, interval = "1m", note = "" }) {
+class ExpirySimulator {
+  constructor(dataDirectory, { onSettled = null } = {}) {
+    this.store = new JsonStore(dataDirectory, "expiry-simulator.json", initial);
+    this.onSettled = typeof onSettled === "function" ? onSettled : null;
+  }
+
+  place({ symbol, direction, stake, entryPrice, durationMs, interval = "1m", note = "", analysisSnapshot = null }) {
     const data = this.store.value;
     const cleanSymbol = String(symbol || "").toUpperCase();
     const amount = Number(stake);
@@ -21,7 +71,7 @@ class ExpirySimulator {
     if (!(price > 0)) throw new Error("Preço de entrada indisponível.");
     if (amount > data.balance + 1e-8) throw new Error(`Saldo simulado insuficiente. Disponível: US$ ${data.balance.toFixed(2)}.`);
     const openedAt = Date.now();
-    const trade = { id: id(), symbol: cleanSymbol, direction, stake: amount, entryPrice: price, currentPrice: price, openedAt, expiresAt: openedAt + duration, durationMs: duration, interval: String(interval), payoutRate: data.payoutRate, note: String(note || "").slice(0, 300), status: "open" };
+    const trade = { id: id(), symbol: cleanSymbol, direction, stake: amount, entryPrice: price, currentPrice: price, openedAt, expiresAt: openedAt + duration, durationMs: duration, interval: String(interval), payoutRate: data.payoutRate, note: String(note || "").slice(0, 300), analysisSnapshot, status: "open" };
     data.balance -= amount;
     data.open.push(trade);
     data.updatedAt = openedAt;
@@ -53,6 +103,7 @@ class ExpirySimulator {
       data.results = data.results.slice(-3000);
       data.updatedAt = now;
       this.store.save();
+      try { this.onSettled?.(settled); } catch {}
     }
     return settled;
   }
@@ -61,13 +112,20 @@ class ExpirySimulator {
     this.settle(prices, now);
     const data = this.store.value;
     data.open.forEach((trade) => { const p = Number(prices[trade.symbol]); if (p > 0) trade.currentPrice = p; });
-    const wins = data.results.filter((x) => x.result === "win").length;
-    const losses = data.results.filter((x) => x.result === "loss").length;
-    const draws = data.results.filter((x) => x.result === "draw").length;
-    const realized = data.results.reduce((sum, x) => sum + Number(x.profit || 0), 0);
+    const stats = statistics(data);
     const locked = data.open.reduce((sum, x) => sum + x.stake, 0);
     const equity = data.balance + locked;
-    return { initialBalance: data.initialBalance, balance: Number(data.balance.toFixed(2)), equity: Number(equity.toFixed(2)), locked: Number(locked.toFixed(2)), payoutRate: data.payoutRate, realized: Number(realized.toFixed(2)), totalReturn: data.initialBalance ? ((equity / data.initialBalance) - 1) * 100 : 0, wins, losses, draws, winRate: wins + losses ? wins / (wins + losses) * 100 : 0, open: data.open.map((x) => ({ ...x, remainingMs: Math.max(0, x.expiresAt - now) })).sort((a,b)=>a.expiresAt-b.expiresAt), results: data.results.slice(-200).reverse(), updatedAt: data.updatedAt };
+    return { initialBalance: data.initialBalance, balance: Number(data.balance.toFixed(2)), equity: Number(equity.toFixed(2)), locked: Number(locked.toFixed(2)), payoutRate: data.payoutRate, ...stats, totalReturn: data.initialBalance ? ((equity / data.initialBalance) - 1) * 100 : 0, open: data.open.map((x) => ({ ...x, remainingMs: Math.max(0, x.expiresAt - now) })).sort((a,b)=>a.expiresAt-b.expiresAt), results: data.results.slice(-200).reverse(), updatedAt: data.updatedAt };
+  }
+
+  settings({ payoutRate }) {
+    if (payoutRate == null) return { payoutRate: this.store.value.payoutRate };
+    const rate = Number(payoutRate);
+    if (!(rate >= 0.5 && rate <= 0.98)) throw new Error("O retorno demo deve ficar entre 50% e 98%.");
+    this.store.value.payoutRate = rate;
+    this.store.value.updatedAt = Date.now();
+    this.store.save();
+    return { payoutRate: rate };
   }
 
   reset(balance = 10000) {
@@ -78,5 +136,4 @@ class ExpirySimulator {
   }
 }
 
-module.exports = { ExpirySimulator };
-
+module.exports = { ExpirySimulator, statistics };

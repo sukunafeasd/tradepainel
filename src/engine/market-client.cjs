@@ -19,6 +19,9 @@ class MarketClient {
     this.inFlight = new Map();
     this.lastHost = null;
     this.lastLatency = null;
+    this.lastSuccessAt = null;
+    this.lastError = null;
+    this.failovers = 0;
   }
 
   async get(pathname, params = {}, ttl = 0) {
@@ -55,8 +58,12 @@ class MarketClient {
         const result = await response.json();
         this.lastHost = host;
         this.lastLatency = Math.round(performance.now() - started);
+        this.lastSuccessAt = Date.now();
+        this.lastError = null;
         return result;
       } catch (error) {
+        this.failovers += 1;
+        this.lastError = error.message;
         errors.push(`${host}: ${error.message}`);
       }
     }
@@ -137,9 +144,8 @@ class MarketClient {
   }
 
   status() {
-    return { host: this.lastHost, latencyMs: this.lastLatency, cachedItems: this.cache.size };
+    return { host: this.lastHost, latencyMs: this.lastLatency, cachedItems: this.cache.size, lastSuccessAt: this.lastSuccessAt, lastError: this.lastError, failovers: this.failovers };
   }
 }
 
 module.exports = { MarketClient, HOSTS, INTERVALS };
-

@@ -136,7 +136,7 @@ function buildRiskPlan({ signal, price, atrValue, levels, account = 10000, riskP
   };
 }
 
-function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, account = 10000, riskPct = 0.5 } = {}) {
+function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, account = 10000, riskPct = 0.5, calibration = null } = {}) {
   validateCandles(candles);
   const closes = candles.map((item) => item.close);
   const volumes = candles.map((item) => item.volume);
@@ -165,9 +165,12 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   const obvSlope = I.slope(obv, 20) || 0;
 
   const reasons = [];
+  const groupWeights = calibration?.groupWeights || {};
   const add = (points, group, label, detail) => {
     if (!points) return;
-    reasons.push({ points, group, label, detail });
+    const basePoints = points;
+    const learnedWeight = clamp(Number(groupWeights[group]) || 1, 0.82, 1.18);
+    reasons.push({ points: Math.round(points * learnedWeight), basePoints, learnedWeight, group, label, detail });
   };
 
   add(Math.round(structure.bias * 24), "estrutura", structure.regime, "Sequência de pivôs e alinhamento das médias.");
@@ -204,6 +207,16 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
     if (micro.buyRatio >= 0.58) add(8, "agressão", `Agressão compradora ${(micro.buyRatio * 100).toFixed(0)}%`, "Compradores tomam mais liquidez no curto prazo.");
     else if (micro.buyRatio <= 0.42) add(-8, "agressão", `Agressão vendedora ${((1 - micro.buyRatio) * 100).toFixed(0)}%`, "Vendedores tomam mais liquidez no curto prazo.");
   }
+  if (!Number.isFinite(micro.buyRatio)) {
+    const recent = candles.slice(-20);
+    const quote = recent.reduce((sum, item) => sum + Number(item.quoteVolume || item.volume * item.close || 0), 0);
+    const taker = recent.reduce((sum, item) => sum + Number(item.takerBuyQuoteVolume || 0), 0);
+    if (quote > 0 && taker > 0) {
+      const ratio = taker / quote;
+      if (ratio >= 0.56) add(5, "agressão", `Compradores tomaram ${(ratio * 100).toFixed(0)}% do volume`, "Agressão estimada pelas velas fechadas recentes.");
+      else if (ratio <= 0.44) add(-5, "agressão", `Vendedores tomaram ${((1 - ratio) * 100).toFixed(0)}% do volume`, "Agressão estimada pelas velas fechadas recentes.");
+    }
+  }
   if (Number.isFinite(micro.spreadPct) && micro.spreadPct > 0.08) add(-3, "liquidez", "Spread elevado", "Execução pode sofrer mais derrapagem.");
 
   let rawScore = reasons.reduce((sum, reason) => sum + reason.points, 0);
@@ -212,14 +225,25 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   const volatilityPct = percent(atrValue, price);
   const trendQuality = adxValue == null ? 0.45 : clamp(adxValue / 45, 0, 1);
   const evidenceGroups = new Set(reasons.filter((reason) => Math.sign(reason.points) === Math.sign(rawScore)).map((reason) => reason.group)).size;
-  const confidence = Math.round(clamp(34 + evidenceGroups * 7 + trendQuality * 18 + Math.min(volumeRatio, 2) * 4, 30, 92));
-  const minimum = confidence >= 68 ? 24 : 30;
+  const conflictingGroups = new Set(reasons.filter((reason) => Math.sign(reason.points) !== Math.sign(rawScore)).map((reason) => reason.group)).size;
+  const rawConfidence = 34 + evidenceGroups * 7 + trendQuality * 18 + Math.min(volumeRatio, 2) * 4 - conflictingGroups * 2;
+  const confidence = Math.round(clamp(rawConfidence * (Number(calibration?.confidenceFactor) || 1), 28, 92));
+  const minimum = (confidence >= 68 ? 24 : 30) + clamp(Number(calibration?.thresholdAdjustment) || 0, -2, 5);
   const signal = rawScore >= minimum ? "COMPRA" : rawScore <= -minimum ? "VENDA" : "AGUARDE";
   const warnings = [];
   if (volatilityPct > 2.2) warnings.push("Volatilidade extrema: reduza o tamanho da posição.");
   if (volumeRatio < 0.55) warnings.push("Volume fraco: rompimentos têm menor qualidade.");
   if (micro.stale) warnings.push("Dados ao vivo estão atrasados; aguarde a reconexão.");
   if (signal !== "AGUARDE" && Math.sign(structure.bias) !== Math.sign(rawScore) && structure.bias !== 0) warnings.push("Sinal está contra a estrutura principal.");
+  if (conflictingGroups >= 3) warnings.push("Existem grupos técnicos conflitantes; a leitura exige confirmação adicional.");
+  if ((calibration?.samples || 0) > 12 && Number(calibration.reliability) < 0.46) warnings.push("A calibração recente está abaixo do esperado; o painel elevou o filtro de entrada.");
+
+  const lastCandle = at(candles);
+  const ageMs = Math.max(0, Date.now() - Number(lastCandle.closeTime || lastCandle.t || Date.now()));
+  const freshnessScore = micro.stale ? 25 : ageMs > 12 * 60 * 60 * 1000 ? 55 : 100;
+  const liquidityScore = Number.isFinite(micro.spreadPct) ? Math.round(clamp(100 - micro.spreadPct * 900, 20, 100)) : 72;
+  const completenessScore = lastCandle.closed === false ? 88 : 100;
+  const dataQualityScore = Math.round(freshnessScore * 0.45 + liquidityScore * 0.35 + completenessScore * 0.2);
 
   return {
     symbol,
@@ -235,6 +259,22 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
     candle,
     reasons: reasons.sort((a, b) => Math.abs(b.points) - Math.abs(a.points)),
     warnings,
+    dataQuality: {
+      score: dataQualityScore,
+      freshness: freshnessScore,
+      liquidity: liquidityScore,
+      completeness: completenessScore,
+      lastCandleClosed: lastCandle.closed !== false,
+      ageMs,
+      conflictingGroups,
+      samples: candles.length,
+    },
+    calibration: calibration ? {
+      samples: calibration.samples || 0,
+      reliability: Number(calibration.reliability || 0.5),
+      state: (calibration.samples || 0) < 12 ? "aquecendo" : (calibration.samples || 0) < 60 ? "calibrando" : "maduro",
+      adjusted: (calibration.samples || 0) >= 12,
+    } : { samples: 0, reliability: 0.5, state: "aquecendo", adjusted: false },
     indicators: {
       ema9: priceRound(at(ema9)), ema20: priceRound(at(ema20)), ema50: priceRound(at(ema50)), ema200: priceRound(at(ema200)),
       rsi: I.round(rsiValue, 2), macd: priceRound(at(macd.line)), macdSignal: priceRound(at(macd.signal)), macdHistogram: priceRound(hist),
