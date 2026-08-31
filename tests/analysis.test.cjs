@@ -1,14 +1,15 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { analyze, combineTimeframes } = require("../src/engine/analysis.cjs");
+const { analyze, combineTimeframes, applyMtfGate, validateCandles } = require("../src/engine/analysis.cjs");
 
-function candles(direction = 1) {
+const spacing = { "1m": 60_000, "15m": 900_000 };
+function candles(direction = 1, interval = "15m") {
   return Array.from({ length: 500 }, (_, i) => {
     const base = 100 + direction * i * 0.08 + Math.sin(i / 8) * 1.2;
     const open = base - direction * 0.07;
     const close = base + direction * 0.07;
-    return { t: 1700000000000 + i * 60000, open, high: Math.max(open, close) + .35, low: Math.min(open, close) - .35, close, volume: 1000 + i * 2, quoteVolume: (1000 + i * 2) * close };
+    return { t: 1700000000000 + i * spacing[interval], open, high: Math.max(open, close) + .35, low: Math.min(open, close) - .35, close, volume: 1000 + i * 2, quoteVolume: (1000 + i * 2) * close };
   });
 }
 
@@ -18,15 +19,36 @@ test("análise produz leitura explicável e série gráfica", () => {
   assert.ok(["COMPRA", "VENDA", "AGUARDE"].includes(result.signal));
   assert.ok(result.confidence >= 0 && result.confidence <= 100);
   assert.ok(result.reasons.length > 3);
-  assert.equal(result.series.candles.length, 260);
+  assert.equal(result.series.candles.length, 500);
   assert.match(result.confidenceMeaning, /não probabilidade/i);
 });
 
 test("confluência agrega timeframes sem prometer probabilidade", () => {
-  const up = analyze(candles(1));
-  const down = analyze(candles(-1));
+  const up = analyze(candles(1, "15m"), { interval: "15m" });
+  const down = analyze(candles(-1, "15m"), { interval: "15m" });
   const value = combineTimeframes({ "1m": up, "5m": up, "15m": down });
   assert.ok(["COMPRA", "VENDA", "AGUARDE"].includes(value.signal));
   assert.ok(value.alignment >= 0 && value.alignment <= 100);
 });
 
+test("MTF indisponível não vira AGUARDE aparentemente válido", () => {
+  const value = combineTimeframes({ "1m": { error: "offline" }, "5m": { error: "offline" } }, { expectedFrames: ["1m", "5m"] });
+  assert.equal(value.status, "unavailable");
+  assert.equal(value.signal, "INDISPONÍVEL");
+  assert.equal(value.coverage, 0);
+});
+
+test("MTF contrário bloqueia plano e direção individual", () => {
+  const base = { signal: "COMPRA", plan: { entry: 100 }, reasons: [], warnings: [] };
+  const gated = applyMtfGate(base, { status: "ready", signal: "VENDA", coverage: 100 });
+  assert.equal(gated.signal, "AGUARDE");
+  assert.equal(gated.plan, null);
+  assert.equal(gated.singleTimeframeSignal, "COMPRA");
+});
+
+test("candles fora de ordem, duplicadas ou insuficientes são rejeitadas", () => {
+  const rows = candles(1, "1m");
+  assert.throws(() => validateCandles(rows.slice(0, 100), { interval: "1m" }), /200/);
+  const duplicate = rows.map((row) => ({ ...row })); duplicate[100].t = duplicate[99].t;
+  assert.throws(() => validateCandles(duplicate, { interval: "1m" }), /ordem|duplicado/i);
+});

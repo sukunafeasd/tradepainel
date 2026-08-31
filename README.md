@@ -31,7 +31,7 @@ Assistente desktop de leitura de mercado e **paper trading** para day trade de c
 
 ## Desenvolvimento
 
-Requer Node.js 22+ e pnpm.
+Requer Node.js 22.12+ e pnpm.
 
 ```text
 pnpm install
@@ -41,7 +41,7 @@ pnpm build
 ```
 
 O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
-## Versão 0.5.0
+## Versão 0.6.0
 
 - Chaves Gemini Auth (`AQ.`) e padrão aceitas, sempre criptografadas pelo Windows.
 - Diagnóstico separado de chave, projeto, modelo, permissão e latência.
@@ -50,3 +50,10 @@ O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, s
 - Gráfico com níveis técnicos automáticos, linhas horizontais e tendências persistentes por par.
 - Alertas de preço, sinal e confluência com aviso visual e sonoro local.
 - Painel de saúde para fluxo ao vivo, failover, latência, IA e memória.
+- Liquidação do simulador exclusivamente por cotação histórica do instante de expiração, com estado pendente quando a fonte não está disponível.
+- Contratos centrais de símbolo, intervalo, timestamps, preço e corpo HTTP, além de persistência atômica com schema, backup, quarentena e diagnóstico.
+- Freshness independente para candle, ticker, book e fluxo; proteção contra sockets antigos, eventos duplicados e relógio local alterado.
+- Gate MTF real, cobertura explícita, velas fechadas e 500 candles para EMA200.
+- Limites, paginação, confirmações destrutivas, idempotência e feedback de acessibilidade na interface.
+- Testes de regressão para engine, simulador, realtime, REST/failover, persistência, credenciais, IA e fronteira HTTP.
+- CI no Windows, auditoria de dependências e hardening dos Electron Fuses no pacote final.

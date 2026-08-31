@@ -1,7 +1,6 @@
 "use strict";
 
 const path = require("path");
-const fs = require("fs");
 const { app, BrowserWindow, shell, safeStorage } = require("electron");
 const { createServer } = require("./server.cjs");
 const { CredentialStore } = require("./security/credential-store.cjs");
@@ -15,28 +14,27 @@ const allowedExternal = new Set([
 
 let localServer = null;
 let mainWindow = null;
+let localAddress = null;
+let quitting = false;
+let closingServer = false;
+let focusRequested = false;
 
 if (process.env.DIEFTRADE_SMOKE_SCREENSHOT) app.setPath("userData", path.join(app.getPath("temp"), `dieftrade-smoke-${process.pid}`));
-if (!app.requestSingleInstanceLock() && !process.env.DIEFTRADE_SMOKE_SCREENSHOT) app.quit();
+const primaryInstance = process.env.DIEFTRADE_SMOKE_SCREENSHOT || app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
 
 app.on("second-instance", () => {
-  if (!mainWindow) return;
+  if (!mainWindow) { focusRequested = true; return; }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
 });
 
-async function start() {
-  const dataDirectory = path.join(app.getPath("userData"), "dieftrade-data");
-  const credentialStore = new CredentialStore(dataDirectory, safeStorage);
-  localServer = createServer({
-    dataDirectory,
-    uiDirectory: path.join(__dirname, "ui"),
-    credentialStore,
-  });
-  const { port, token } = await localServer.listen();
-
-  mainWindow = new BrowserWindow({
+async function createMainWindow() {
+  if (!localAddress || mainWindow) return mainWindow;
+  const { port, token } = localAddress;
+  const localOrigin = `http://127.0.0.1:${port}`;
+  const window = new BrowserWindow({
     width: 1540,
     height: 960,
     minWidth: 1120,
@@ -54,46 +52,57 @@ async function start() {
       devTools: process.env.DIEFTRADE_DEV === "1",
     },
   });
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (allowedExternal.has(url)) shell.openExternal(url);
+  mainWindow = window;
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (allowedExternal.has(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
-    const localOrigin = `http://127.0.0.1:${port}`;
-    if (!url.startsWith(localOrigin)) event.preventDefault();
+  window.webContents.on("will-navigate", (event, target) => {
+    try { if (new URL(target).origin !== localOrigin) event.preventDefault(); }
+    catch { event.preventDefault(); }
   });
-  mainWindow.once("ready-to-show", () => {
-    mainWindow.show();
-    mainWindow.focus();
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (!quitting && details.reason !== "clean-exit") void window.loadURL(`${localOrigin}/#t=${encodeURIComponent(token)}`);
   });
-  mainWindow.on("closed", () => { mainWindow = null; });
-  await mainWindow.loadURL(`http://127.0.0.1:${port}/?t=${encodeURIComponent(token)}`);
+  window.once("ready-to-show", () => { window.show(); window.focus(); focusRequested = false; });
+  window.on("closed", () => { if (mainWindow === window) mainWindow = null; });
+  await window.loadURL(`${localOrigin}/#t=${encodeURIComponent(token)}`);
+  return window;
+}
+
+async function start() {
+  const dataDirectory = path.join(app.getPath("userData"), "dieftrade-data");
+  const credentialStore = new CredentialStore(dataDirectory, safeStorage);
+  localServer = createServer({
+    dataDirectory,
+    uiDirectory: path.join(__dirname, "ui"),
+    credentialStore,
+  });
+  localAddress = await localServer.listen();
+  await createMainWindow();
   if (process.env.DIEFTRADE_SMOKE_SCREENSHOT) {
-    await new Promise((resolve) => setTimeout(resolve, 9000));
-    const smoke = await mainWindow.webContents.executeJavaScript(`(async()=>{
-      const theme=document.querySelector('[data-theme="midnight"]'); theme?.click();
-       const input=document.getElementById('paperQty'); input.value='100'; input.dispatchEvent(new Event('input',{bubbles:true}));
-       document.getElementById('paperForm').requestSubmit(); await new Promise(r=>setTimeout(r,5000));
-       document.querySelector('[data-tab="paper"]')?.click(); await new Promise(r=>setTimeout(r,150));
-       return {theme:document.body.dataset.theme,paperMessage:document.getElementById('paperMessage').textContent,openTrades:document.querySelectorAll('#positions .trade-open').length,coinCount:Number(document.getElementById('coinCount').textContent),price:document.getElementById('price').textContent,duck:Boolean(document.getElementById('pixel')),chartTools:document.querySelectorAll('.chart-actions button').length,simStats:document.querySelectorAll('#simStats>div').length,healthItems:document.querySelectorAll('#healthGrid .health-item').length,authHint:document.querySelector('.secure-note')?.textContent.includes('AQ.')};
-    })()`);
-    if (process.env.DIEFTRADE_SMOKE_REPORT) fs.writeFileSync(process.env.DIEFTRADE_SMOKE_REPORT, JSON.stringify(smoke, null, 2));
-    const image = await mainWindow.webContents.capturePage();
-    fs.writeFileSync(process.env.DIEFTRADE_SMOKE_SCREENSHOT, image.toPNG());
+    // O executor visual existe apenas no checkout de desenvolvimento e não é empacotado.
+    const { runSmoke } = require("../scripts/smoke-runner.cjs");
+    await runSmoke(mainWindow, process.env);
     app.quit();
   }
 }
 
-app.whenReady().then(start).catch((error) => {
+if (primaryInstance) app.whenReady().then(start).catch((error) => {
   console.error(error);
   app.quit();
 });
+
+app.on("activate", () => { if (!mainWindow && localAddress && !quitting) void createMainWindow(); });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  if (localServer) void localServer.close();
+app.on("before-quit", (event) => {
+  if (!localServer || closingServer) return;
+  event.preventDefault();
+  quitting = true;
+  closingServer = true;
+  void localServer.close().catch((error) => console.error("Falha ao encerrar o serviço local:", error)).finally(() => app.exit(0));
 });

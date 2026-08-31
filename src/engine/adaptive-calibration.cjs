@@ -3,8 +3,9 @@
 const { JsonStore } = require("./storage.cjs");
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const initial = () => ({
-  version: 1,
+const SCHEMA_VERSION = 2;
+const initial = (now = Date.now()) => ({
+  schemaVersion: SCHEMA_VERSION,
   samples: 0,
   hits: 0,
   misses: 0,
@@ -12,8 +13,24 @@ const initial = () => ({
   buckets: {},
   groups: {},
   recent: [],
-  updatedAt: Date.now(),
+  updatedAt: now,
 });
+
+function migrate(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return {
+    ...initial(Number(value.updatedAt) || Date.now()),
+    ...value,
+    schemaVersion: SCHEMA_VERSION,
+    buckets: value.buckets && typeof value.buckets === "object" && !Array.isArray(value.buckets) ? value.buckets : {},
+    groups: value.groups && typeof value.groups === "object" && !Array.isArray(value.groups) ? value.groups : {},
+    recent: Array.isArray(value.recent) ? value.recent.slice(-250) : [],
+  };
+}
+
+function validate(value) {
+  return Boolean(value && value.schemaVersion === SCHEMA_VERSION && Number.isInteger(value.samples) && value.samples >= 0 && Number.isInteger(value.hits) && value.hits >= 0 && Number.isInteger(value.misses) && value.misses >= 0 && Number.isInteger(value.draws) && value.draws >= 0 && value.buckets && value.groups && Array.isArray(value.recent));
+}
 
 function bucket(map, key) {
   if (!map[key]) map[key] = { samples: 0, hits: 0, misses: 0 };
@@ -33,8 +50,9 @@ function bayesianReliability(entry, priorSamples = 10, priorRate = 0.5) {
 }
 
 class AdaptiveCalibrator {
-  constructor(dataDirectory) {
-    this.store = new JsonStore(dataDirectory, "adaptive-calibration.json", initial);
+  constructor(dataDirectory, { now = () => Date.now() } = {}) {
+    this.now = now;
+    this.store = new JsonStore(dataDirectory, "adaptive-calibration.json", () => initial(this.now()), { migrate, validate });
   }
 
   profile({ symbol = "GLOBAL", interval = "15m" } = {}) {
@@ -88,7 +106,7 @@ class AdaptiveCalibrator {
         update(bucket(data.groups, String(reason.group).slice(0, 60)), Math.sign(points) === (actual === "COMPRA" ? 1 : -1));
       }
       data.recent.push({
-        at: Number(trade.closedAt) || Date.now(),
+        at: Number(trade.closedAt) || this.now(),
         symbol: reading.symbol,
         interval: reading.interval,
         predicted: reading.signal,
@@ -101,7 +119,7 @@ class AdaptiveCalibrator {
       changed = true;
     }
     if (changed) {
-      data.updatedAt = Date.now();
+      data.updatedAt = this.now();
       this.store.save();
     }
     return this.status();
@@ -123,7 +141,7 @@ class AdaptiveCalibrator {
   }
 
   reset() {
-    this.store.value = initial();
+    this.store.value = initial(this.now());
     this.store.save();
     return this.status();
   }

@@ -25,7 +25,7 @@ test("Gemini usa o endpoint, cabeçalho e resposta corretos", async () => {
       ok: true,
       status: 200,
       headers: new Headers({ "x-guploader-uploadid": "gemini-request" }),
-      json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ veredito: "AGUARDE", resumo: "Teste controlado" }) }] } }] }),
+      json: async () => ({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify({ veredito: "AGUARDE", resumo: "Teste controlado", contexto: "Mercado em teste", confirmacoes: [], conflitos: [], riscos: ["Teste"], gatilho: "Aguardar", invalidacao: "Sem entrada", gerenciamento: "Não operar" }) }] } }] }),
     };
   };
   try {

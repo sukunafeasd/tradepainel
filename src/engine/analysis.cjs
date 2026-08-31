@@ -1,22 +1,35 @@
 "use strict";
 
 const I = require("./indicators.cjs");
+const { cleanInterval, cleanSymbol, validTimestamp } = require("./contracts.cjs");
 
 const at = (series, offset = 1) => series[series.length - offset];
 const percent = (part, total) => total ? (part / total) * 100 : 0;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const priceRound = (value) => Number.isFinite(value) ? Number(value.toPrecision(10)) : null;
+const INTERVAL_MS = { "1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000, "2h": 7200000, "4h": 14400000, "6h": 21600000, "8h": 28800000, "12h": 43200000, "1d": 86400000 };
+const SHORT_MICRO_INTERVALS = new Set(["1m", "3m", "5m"]);
 
-function validateCandles(candles) {
-  if (!Array.isArray(candles) || candles.length < 60) throw new Error("São necessárias pelo menos 60 velas.");
+function validateCandles(candles, { interval = null, minimum = 200 } = {}) {
+  if (!Array.isArray(candles) || candles.length < minimum) throw new Error(`São necessárias pelo menos ${minimum} velas válidas.`);
+  const expected = interval ? INTERVAL_MS[cleanInterval(interval)] : null;
+  let previous = null;
+  let gaps = 0;
   for (const candle of candles) {
     for (const field of ["t", "open", "high", "low", "close", "volume"]) {
       if (!Number.isFinite(candle[field])) throw new Error(`Vela inválida: ${field}.`);
     }
-    if (candle.high < candle.low || candle.high < candle.open || candle.high < candle.close || candle.low > candle.open || candle.low > candle.close) {
-      throw new Error("OHLC inconsistente.");
+    validTimestamp(candle.t, "Timestamp da vela");
+    if (!(candle.open > 0 && candle.high > 0 && candle.low > 0 && candle.close > 0) || candle.volume < 0) throw new Error("Preço/volume inválido na série de velas.");
+    if (candle.high < candle.low || candle.high < candle.open || candle.high < candle.close || candle.low > candle.open || candle.low > candle.close) throw new Error("OHLC inconsistente.");
+    if (previous != null) {
+      const distance = candle.t - previous;
+      if (distance <= 0) throw new Error(distance === 0 ? "A série possui timestamps duplicados." : "As velas estão fora de ordem.");
+      if (expected && distance !== expected) gaps += 1;
     }
+    previous = candle.t;
   }
+  return { gaps, expectedIntervalMs: expected };
 }
 
 function detectPivots(candles, width = 3, lookback = 180) {
@@ -24,46 +37,53 @@ function detectPivots(candles, width = 3, lookback = 180) {
   const highs = [];
   const lows = [];
   for (let i = start; i < candles.length - width; i += 1) {
-    let isHigh = true;
-    let isLow = true;
-    for (let j = i - width; j <= i + width; j += 1) {
-      if (j === i) continue;
-      if (candles[j].high >= candles[i].high) isHigh = false;
-      if (candles[j].low <= candles[i].low) isLow = false;
-    }
-    if (isHigh) highs.push({ index: i, price: candles[i].high, t: candles[i].t });
-    if (isLow) lows.push({ index: i, price: candles[i].low, t: candles[i].t });
+    const neighbors = candles.slice(i - width, i + width + 1);
+    const maxHigh = Math.max(...neighbors.map((item) => item.high));
+    const minLow = Math.min(...neighbors.map((item) => item.low));
+    if (candles[i].high === maxHigh && neighbors.findIndex((item) => item.high === maxHigh) === width) highs.push({ index: i, price: candles[i].high, t: candles[i].t, type: "resistance" });
+    if (candles[i].low === minLow && neighbors.findIndex((item) => item.low === minLow) === width) lows.push({ index: i, price: candles[i].low, t: candles[i].t, type: "support" });
   }
   return { highs, lows };
 }
 
 function clusterLevels(points, tolerance) {
+  const sorted = [...points].sort((a, b) => a.price - b.price || a.index - b.index);
   const clusters = [];
-  for (const point of points) {
-    let cluster = clusters.find((item) => Math.abs(item.price - point.price) <= tolerance);
-    if (!cluster) {
-      cluster = { price: point.price, touches: 0, lastIndex: point.index };
-      clusters.push(cluster);
+  for (const point of sorted) {
+    const previous = clusters.at(-1);
+    if (!previous || Math.abs(previous.price - point.price) > tolerance) {
+      clusters.push({ price: point.price, touches: 1, lastIndex: point.index, supportTouches: point.type === "support" ? 1 : 0, resistanceTouches: point.type === "resistance" ? 1 : 0 });
+      continue;
     }
-    cluster.price = (cluster.price * cluster.touches + point.price) / (cluster.touches + 1);
-    cluster.touches += 1;
-    cluster.lastIndex = Math.max(cluster.lastIndex, point.index);
+    previous.price = (previous.price * previous.touches + point.price) / (previous.touches + 1);
+    previous.touches += 1;
+    previous.lastIndex = Math.max(previous.lastIndex, point.index);
+    previous.supportTouches += point.type === "support" ? 1 : 0;
+    previous.resistanceTouches += point.type === "resistance" ? 1 : 0;
   }
-  return clusters.sort((a, b) => b.touches - a.touches || b.lastIndex - a.lastIndex);
+  return clusters;
 }
 
 function supportResistance(candles, pivots, atrValue) {
   const price = at(candles).close;
-  const tolerance = Math.max(atrValue * 0.35, price * 0.0008);
+  const tolerance = Math.max(Math.max(atrValue, 0) * 0.35, price * 0.0008);
+  const lastIndex = candles.length - 1;
   const levels = clusterLevels([...pivots.highs, ...pivots.lows], tolerance)
     .filter((level) => level.touches >= 2)
-    .map((level) => ({ ...level, distancePct: ((level.price / price) - 1) * 100 }));
-  const supports = levels.filter((level) => level.price < price).sort((a, b) => b.price - a.price).slice(0, 4);
-  const resistances = levels.filter((level) => level.price > price).sort((a, b) => a.price - b.price).slice(0, 4);
-  return { supports, resistances };
+    .map((level) => {
+      const distancePct = ((level.price / price) - 1) * 100;
+      const recency = 1 / (1 + Math.max(0, lastIndex - level.lastIndex) / 40);
+      const strength = level.touches * 2 + recency * 2;
+      return { ...level, distancePct, strength: Number(strength.toFixed(3)), role: level.supportTouches > level.resistanceTouches ? "support" : level.resistanceTouches > level.supportTouches ? "resistance" : "flip" };
+    });
+  const rank = (a, b) => (Math.abs(a.distancePct) + 0.6 / a.strength) - (Math.abs(b.distancePct) + 0.6 / b.strength);
+  const equal = levels.filter((level) => Math.abs(level.price - price) <= tolerance / 2).sort((a, b) => b.strength - a.strength);
+  const supports = levels.filter((level) => level.price < price).sort(rank).slice(0, 4);
+  const resistances = levels.filter((level) => level.price > price).sort(rank).slice(0, 4);
+  return { supports, resistances, atPrice: equal.slice(0, 2), tolerance };
 }
 
-function candleReading(candles, atrValue) {
+function candleReading(candles, atrValue, structureBias = 0) {
   const current = at(candles);
   const previous = at(candles, 2);
   const body = Math.abs(current.close - current.open);
@@ -71,249 +91,254 @@ function candleReading(candles, atrValue) {
   const upperWick = current.high - Math.max(current.open, current.close);
   const lowerWick = Math.min(current.open, current.close) - current.low;
   const bullish = current.close > current.open;
+  const bearish = current.close < current.open;
   const previousBullish = previous.close > previous.open;
+  const previousBearish = previous.close < previous.open;
   const patterns = [];
   if (body / range < 0.12) patterns.push({ id: "doji", label: "Doji / indecisão", bias: 0 });
-  if (lowerWick > body * 2.2 && upperWick < body * 0.9) patterns.push({ id: "hammer", label: "Rejeição compradora", bias: 1 });
-  if (upperWick > body * 2.2 && lowerWick < body * 0.9) patterns.push({ id: "shooting-star", label: "Rejeição vendedora", bias: -1 });
-  if (bullish && !previousBullish && current.open <= previous.close && current.close >= previous.open) {
-    patterns.push({ id: "bullish-engulfing", label: "Engolfo de alta", bias: 1 });
-  }
-  if (!bullish && previousBullish && current.open >= previous.close && current.close <= previous.open) {
-    patterns.push({ id: "bearish-engulfing", label: "Engolfo de baixa", bias: -1 });
-  }
-  if (body > atrValue * 0.9 && body / range > 0.68) {
-    patterns.push({ id: bullish ? "bull-impulse" : "bear-impulse", label: bullish ? "Vela de impulso comprador" : "Vela de impulso vendedor", bias: bullish ? 1 : -1 });
-  }
-  return {
-    direction: bullish ? "alta" : current.close < current.open ? "baixa" : "neutra",
-    bodyPct: percent(body, range),
-    upperWickPct: percent(upperWick, range),
-    lowerWickPct: percent(lowerWick, range),
-    patterns,
-  };
+  if (structureBias <= 0 && lowerWick > Math.max(body, range * 0.04) * 2.2 && upperWick < Math.max(body, range * 0.04) * 0.9) patterns.push({ id: "hammer", label: "Rejeição compradora em contexto de queda/transição", bias: 1 });
+  if (structureBias >= 0 && upperWick > Math.max(body, range * 0.04) * 2.2 && lowerWick < Math.max(body, range * 0.04) * 0.9) patterns.push({ id: "shooting-star", label: "Rejeição vendedora em contexto de alta/transição", bias: -1 });
+  if (bullish && previousBearish && current.open <= previous.close && current.close >= previous.open) patterns.push({ id: "bullish-engulfing", label: "Engolfo de alta", bias: 1 });
+  if (bearish && previousBullish && current.open >= previous.close && current.close <= previous.open) patterns.push({ id: "bearish-engulfing", label: "Engolfo de baixa", bias: -1 });
+  if (body > Math.max(atrValue, Number.EPSILON) * 0.9 && body / range > 0.68 && (bullish || bearish)) patterns.push({ id: bullish ? "bull-impulse" : "bear-impulse", label: bullish ? "Vela de impulso comprador" : "Vela de impulso vendedor", bias: bullish ? 1 : -1 });
+  return { direction: bullish ? "alta" : bearish ? "baixa" : "neutra", bodyPct: percent(body, range), upperWickPct: percent(upperWick, range), lowerWickPct: percent(lowerWick, range), patterns };
 }
 
 function inferStructure(pivots, ema20, ema50, ema200, close, emaSlope) {
   const highs = pivots.highs.slice(-3);
   const lows = pivots.lows.slice(-3);
-  const higherHighs = highs.length >= 2 && highs[highs.length - 1].price > highs[highs.length - 2].price;
-  const higherLows = lows.length >= 2 && lows[lows.length - 1].price > lows[lows.length - 2].price;
-  const lowerHighs = highs.length >= 2 && highs[highs.length - 1].price < highs[highs.length - 2].price;
-  const lowerLows = lows.length >= 2 && lows[lows.length - 1].price < lows[lows.length - 2].price;
+  const lastHigh = highs.at(-1);
+  const previousHigh = highs.at(-2);
+  const lastLow = lows.at(-1);
+  const previousLow = lows.at(-2);
+  const chronological = lastHigh && previousHigh && lastLow && previousLow && Math.max(previousHigh.index, previousLow.index) < Math.max(lastHigh.index, lastLow.index);
+  const higherHighs = chronological && lastHigh.price > previousHigh.price;
+  const higherLows = chronological && lastLow.price > previousLow.price;
+  const lowerHighs = chronological && lastHigh.price < previousHigh.price;
+  const lowerLows = chronological && lastLow.price < previousLow.price;
   if (higherHighs && higherLows && close > ema20 && ema20 > ema50 && emaSlope > 0) return { regime: "tendência de alta", bias: 1, hh: true, hl: true };
   if (lowerHighs && lowerLows && close < ema20 && ema20 < ema50 && emaSlope < 0) return { regime: "tendência de baixa", bias: -1, lh: true, ll: true };
-  if (ema200 && close > ema200 && ema20 > ema50 && emaSlope > 0) return { regime: "alta em construção", bias: 0.65 };
-  if (ema200 && close < ema200 && ema20 < ema50 && emaSlope < 0) return { regime: "baixa em construção", bias: -0.65 };
+  if (Number.isFinite(ema200) && close > ema200 && ema20 > ema50 && emaSlope > 0) return { regime: "alta em construção", bias: 0.65 };
+  if (Number.isFinite(ema200) && close < ema200 && ema20 < ema50 && emaSlope < 0) return { regime: "baixa em construção", bias: -0.65 };
   return { regime: "lateral / transição", bias: 0 };
 }
 
-function buildRiskPlan({ signal, price, atrValue, levels, account = 10000, riskPct = 0.5 }) {
-  if (signal === "AGUARDE") return null;
+function selectPlanLevel(rows, price, atrValue) {
+  return (rows || []).filter((level) => Math.abs(level.price - price) <= Math.max(atrValue * 4, price * 0.04)).sort((a, b) => b.strength - a.strength || Math.abs(a.distancePct) - Math.abs(b.distancePct))[0]?.price ?? null;
+}
+
+function buildRiskPlan({ signal, price, atrValue, levels, account = 10000, riskPct = 0.5, spreadPct = 0 }) {
+  if (signal === "AGUARDE" || !(price > 0) || !(atrValue >= 0)) return null;
   const side = signal === "COMPRA" ? 1 : -1;
-  const nearestLevel = side > 0 ? levels.supports[0]?.price : levels.resistances[0]?.price;
+  const nearestLevel = selectPlanLevel(side > 0 ? levels.supports : levels.resistances, price, atrValue);
   const technicalStop = nearestLevel == null
-    ? price - side * atrValue * 1.35
-    : side > 0
-      ? Math.min(price - atrValue * 0.9, nearestLevel - atrValue * 0.18)
-      : Math.max(price + atrValue * 0.9, nearestLevel + atrValue * 0.18);
+    ? price - side * Math.max(atrValue, price * 0.001) * 1.35
+    : side > 0 ? Math.min(price - Math.max(atrValue, price * 0.001) * 0.9, nearestLevel - Math.max(atrValue, price * 0.001) * 0.18) : Math.max(price + Math.max(atrValue, price * 0.001) * 0.9, nearestLevel + Math.max(atrValue, price * 0.001) * 0.18);
+  if (!(technicalStop > 0)) return null;
   const riskPerUnit = Math.abs(price - technicalStop);
-  const target1 = price + side * riskPerUnit * 1.25;
-  const target2 = price + side * riskPerUnit * 2;
-  const riskBudget = Math.max(0, account) * clamp(riskPct, 0.1, 3) / 100;
-  const quantity = riskPerUnit > 0 ? riskBudget / riskPerUnit : 0;
+  if (!(riskPerUnit > 0)) return null;
+  const target1Raw = price + side * riskPerUnit * 1.25;
+  const target2Raw = price + side * riskPerUnit * 2;
+  const obstacle = side > 0 ? (levels.resistances || []).filter((level) => level.price > price).sort((a, b) => a.price - b.price)[0] : (levels.supports || []).filter((level) => level.price < price).sort((a, b) => b.price - a.price)[0];
+  const obstacleBeforeTarget = obstacle && (side > 0 ? obstacle.price < target2Raw : obstacle.price > target2Raw);
+  const target2 = obstacleBeforeTarget ? obstacle.price - side * Math.max(atrValue * 0.08, price * 0.0002) : target2Raw;
+  const target1 = side > 0 ? Math.min(target1Raw, target2) : Math.max(target1Raw, target2);
+  const cleanAccount = Math.max(0, Number(account) || 0);
+  const riskBudget = cleanAccount * clamp(Number(riskPct) || 0.5, 0.1, 3) / 100;
+  const riskQuantity = riskBudget / riskPerUnit;
+  const cashQuantity = cleanAccount / price;
+  const quantity = Math.max(0, Math.min(riskQuantity, cashQuantity));
+  const effectiveRisk = riskPerUnit + price * Math.max(0, Number(spreadPct) || 0) / 100;
+  const effectiveReward = Math.abs(target2 - price) - price * Math.max(0, Number(spreadPct) || 0) / 100;
   return {
-    entry: priceRound(price),
-    stop: priceRound(technicalStop),
-    target1: priceRound(target1),
-    target2: priceRound(target2),
+    entry: priceRound(price), stop: priceRound(technicalStop), target1: priceRound(target1), target2: priceRound(target2),
     invalidation: side > 0 ? "Fechamento abaixo do stop ou perda da estrutura compradora." : "Fechamento acima do stop ou perda da estrutura vendedora.",
-    riskReward1: 1.25,
-    riskReward2: 2,
-    riskBudget: Number(riskBudget.toFixed(2)),
-    suggestedQuantity: Number(quantity.toPrecision(8)),
-    riskPct: clamp(riskPct, 0.1, 3),
+    riskReward1: Number((Math.abs(target1 - price) / effectiveRisk).toFixed(2)), riskReward2: Number((Math.max(0, effectiveReward) / effectiveRisk).toFixed(2)),
+    riskBudget: Number(riskBudget.toFixed(2)), suggestedQuantity: Number(quantity.toPrecision(8)), notional: Number((quantity * price).toFixed(2)), leverageRequired: false,
+    riskPct: clamp(Number(riskPct) || 0.5, 0.1, 3), obstacle: obstacleBeforeTarget ? priceRound(obstacle.price) : null,
+    executionNote: "Quantidade educativa limitada ao saldo, sem alavancagem; ajuste a tickSize/stepSize da corretora antes de qualquer uso externo.",
   };
 }
 
-function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, account = 10000, riskPct = 0.5, calibration = null } = {}) {
-  validateCandles(candles);
-  const closes = candles.map((item) => item.close);
-  const volumes = candles.map((item) => item.volume);
-  const ema9 = I.ema(closes, 9);
-  const ema20 = I.ema(closes, 20);
-  const ema50 = I.ema(closes, 50);
-  const ema200 = I.ema(closes, 200);
-  const rsi14 = I.rsi(closes, 14);
-  const macd = I.macd(closes);
-  const bb = I.bollinger(closes);
-  const atr14 = I.atr(candles, 14);
-  const vwap = I.vwap(candles);
-  const stochastic = I.stochastic(candles);
-  const adx14 = I.adx(candles, 14);
-  const obv = I.obv(candles);
-  const roc = I.rateOfChange(closes, 12);
-  const price = at(candles).close;
-  const atrValue = at(atr14) || price * 0.005;
-  const pivots = detectPivots(candles);
-  const levels = supportResistance(candles, pivots, atrValue);
+function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, account = 10000, riskPct = 0.5, calibration = null, now = Date.now() } = {}) {
+  const cleanSymbolValue = cleanSymbol(symbol);
+  const cleanIntervalValue = cleanInterval(interval);
+  validateCandles(candles, { interval: cleanIntervalValue, minimum: 200 });
+  const confirmed = candles.filter((item) => item.closed !== false);
+  if (confirmed.length < 200) throw new Error("Dados insuficientes: são necessárias 200 velas fechadas para EMA 200.");
+  const calc = confirmed;
+  const validation = validateCandles(calc, { interval: cleanIntervalValue, minimum: 200 });
+  const closes = calc.map((item) => item.close);
+  const volumes = calc.map((item) => item.volume);
+  const ema9 = I.ema(closes, 9); const ema20 = I.ema(closes, 20); const ema50 = I.ema(closes, 50); const ema200 = I.ema(closes, 200);
+  const rsi14 = I.rsi(closes, 14); const macd = I.macd(closes); const bb = I.bollinger(closes); const atr14 = I.atr(calc, 14);
+  const vwapAllowed = !["4h", "6h", "8h", "12h", "1d"].includes(cleanIntervalValue);
+  const vwap = I.vwap(calc, { anchor: cleanIntervalValue === "1h" || cleanIntervalValue === "2h" ? "week" : "day" });
+  const stochastic = I.stochastic(calc); const adx14 = I.adx(calc, 14); const obv = I.obv(calc); const roc = I.rateOfChange(closes, 12);
+  const price = at(calc).close;
+  const atrRaw = at(atr14);
+  const atrValue = Number.isFinite(atrRaw) ? atrRaw : null;
+  if (atrValue == null) throw new Error("ATR indisponível para a amostra atual.");
+  const pivots = detectPivots(calc);
+  const levels = supportResistance(calc, pivots, atrValue);
   const structure = inferStructure(pivots, at(ema20), at(ema50), at(ema200), price, I.slope(ema20.filter(Number.isFinite), 12) || 0);
-  const candle = candleReading(candles, atrValue);
-  const profile = I.volumeProfile(candles);
-  const averageVolume = at(I.sma(volumes, 20)) || 0;
-  const volumeRatio = averageVolume > 0 ? at(volumes) / averageVolume : 1;
+  const candle = candleReading(calc, atrValue, structure.bias);
+  const profile = I.volumeProfile(calc);
+  const previousVolumes = volumes.slice(-21, -1);
+  const averageVolume = previousVolumes.length ? previousVolumes.reduce((sum, value) => sum + value, 0) / previousVolumes.length : 0;
+  const volumeRatio = averageVolume > 0 ? at(volumes) / averageVolume : null;
   const obvSlope = I.slope(obv, 20) || 0;
-
   const reasons = [];
   const groupWeights = calibration?.groupWeights || {};
   const add = (points, group, label, detail) => {
-    if (!points) return;
+    if (!Number.isFinite(points) || points === 0) return;
     const basePoints = points;
     const learnedWeight = clamp(Number(groupWeights[group]) || 1, 0.82, 1.18);
     reasons.push({ points: Math.round(points * learnedWeight), basePoints, learnedWeight, group, label, detail });
   };
 
-  add(Math.round(structure.bias * 24), "estrutura", structure.regime, "Sequência de pivôs e alinhamento das médias.");
+  add(Math.round(structure.bias * 24), "estrutura", structure.regime, "Sequência temporal de pivôs e alinhamento das médias.");
   if (at(ema9) > at(ema20) && at(ema20) > at(ema50)) add(14, "tendência", "Médias alinhadas para alta", "EMA 9 acima da 20 e da 50.");
   else if (at(ema9) < at(ema20) && at(ema20) < at(ema50)) add(-14, "tendência", "Médias alinhadas para baixa", "EMA 9 abaixo da 20 e da 50.");
-  if (at(ema200) != null) add(price > at(ema200) ? 7 : -7, "macro", price > at(ema200) ? "Preço acima da EMA 200" : "Preço abaixo da EMA 200", "Viés direcional de fundo.");
-
+  if (Number.isFinite(at(ema200))) {
+    if (price > at(ema200)) add(7, "macro", "Preço acima da EMA 200", "Viés direcional de fundo.");
+    else if (price < at(ema200)) add(-7, "macro", "Preço abaixo da EMA 200", "Viés direcional de fundo.");
+  }
   const rsiValue = at(rsi14);
   if (rsiValue >= 55 && rsiValue <= 72) add(8, "momentum", `RSI ${rsiValue.toFixed(1)} comprador`, "Força sem extremo grave.");
   else if (rsiValue <= 45 && rsiValue >= 28) add(-8, "momentum", `RSI ${rsiValue.toFixed(1)} vendedor`, "Fraqueza sem extremo grave.");
   else if (rsiValue > 78) add(-4, "exaustão", `RSI ${rsiValue.toFixed(1)} muito esticado`, "Risco de realização compradora.");
   else if (rsiValue < 22) add(4, "exaustão", `RSI ${rsiValue.toFixed(1)} muito esticado`, "Risco de repique vendedor.");
-
-  const hist = at(macd.histogram);
-  const previousHist = at(macd.histogram, 2);
-  if (hist != null && previousHist != null) {
+  const hist = at(macd.histogram); const previousHist = at(macd.histogram, 2);
+  if (Number.isFinite(hist) && Number.isFinite(previousHist)) {
     if (hist > 0 && hist > previousHist) add(10, "momentum", "MACD acelera para cima", "Histograma positivo e crescente.");
     if (hist < 0 && hist < previousHist) add(-10, "momentum", "MACD acelera para baixo", "Histograma negativo e decrescente.");
   }
-
   const vwapValue = at(vwap);
-  add(price > vwapValue ? 7 : -7, "fluxo", price > vwapValue ? "Preço acima da VWAP" : "Preço abaixo da VWAP", "Controle intradiário pelo preço médio ponderado.");
-  if (volumeRatio >= 1.5) add(at(candles).close >= at(candles).open ? 7 : -7, "volume", `Volume ${volumeRatio.toFixed(2)}x acima da média`, "A última vela teve participação relevante.");
+  if (vwapAllowed && Number.isFinite(vwapValue)) {
+    if (price > vwapValue) add(7, "fluxo", "Preço acima da VWAP", "Controle pelo preço médio ponderado da sessão.");
+    else if (price < vwapValue) add(-7, "fluxo", "Preço abaixo da VWAP", "Controle pelo preço médio ponderado da sessão.");
+  }
+  if (Number.isFinite(volumeRatio) && volumeRatio >= 1.5) {
+    if (at(calc).close > at(calc).open) add(7, "volume", `Volume ${volumeRatio.toFixed(2)}x acima da média`, "A última vela fechada teve participação compradora relevante.");
+    else if (at(calc).close < at(calc).open) add(-7, "volume", `Volume ${volumeRatio.toFixed(2)}x acima da média`, "A última vela fechada teve participação vendedora relevante.");
+  }
   if (obvSlope > 0) add(4, "volume", "OBV acumula", "Volume acompanha altas recentes.");
   else if (obvSlope < 0) add(-4, "volume", "OBV distribui", "Volume acompanha baixas recentes.");
+  for (const pattern of candle.patterns) add(pattern.bias * 5, "vela", pattern.label, "Padrão confirmado na última vela fechada.");
 
-  for (const pattern of candle.patterns) add(pattern.bias * 5, "vela", pattern.label, "Padrão detectado na vela atual.");
-
-  if (Number.isFinite(micro.bookImbalance)) {
-    if (micro.bookImbalance >= 0.58) add(8, "book", `Book comprador ${(micro.bookImbalance * 100).toFixed(0)}%`, "Maior liquidez imediata do lado comprador.");
-    else if (micro.bookImbalance <= 0.42) add(-8, "book", `Book vendedor ${((1 - micro.bookImbalance) * 100).toFixed(0)}%`, "Maior liquidez imediata do lado vendedor.");
+  const useMicro = SHORT_MICRO_INTERVALS.has(cleanIntervalValue) && micro.stale === false;
+  if (useMicro && Number.isFinite(micro.bookImbalance)) {
+    if (micro.bookImbalance >= 0.58) add(6, "book", `Book comprador ${(micro.bookImbalance * 100).toFixed(0)}%`, "Pressão imediata ponderada por distância ao preço.");
+    else if (micro.bookImbalance <= 0.42) add(-6, "book", `Book vendedor ${((1 - micro.bookImbalance) * 100).toFixed(0)}%`, "Pressão imediata ponderada por distância ao preço.");
   }
-  if (Number.isFinite(micro.buyRatio)) {
-    if (micro.buyRatio >= 0.58) add(8, "agressão", `Agressão compradora ${(micro.buyRatio * 100).toFixed(0)}%`, "Compradores tomam mais liquidez no curto prazo.");
-    else if (micro.buyRatio <= 0.42) add(-8, "agressão", `Agressão vendedora ${((1 - micro.buyRatio) * 100).toFixed(0)}%`, "Vendedores tomam mais liquidez no curto prazo.");
+  if (useMicro && Number.isFinite(micro.buyRatio)) {
+    if (micro.buyRatio >= 0.58) add(7, "agressão", `Agressão compradora ${(micro.buyRatio * 100).toFixed(0)}%`, "Compradores tomam mais liquidez nos últimos 60 segundos.");
+    else if (micro.buyRatio <= 0.42) add(-7, "agressão", `Agressão vendedora ${((1 - micro.buyRatio) * 100).toFixed(0)}%`, "Vendedores tomam mais liquidez nos últimos 60 segundos.");
   }
-  if (!Number.isFinite(micro.buyRatio)) {
-    const recent = candles.slice(-20);
-    const quote = recent.reduce((sum, item) => sum + Number(item.quoteVolume || item.volume * item.close || 0), 0);
+  if (!useMicro || !Number.isFinite(micro.buyRatio)) {
+    const recent = calc.slice(-20);
+    const quote = recent.reduce((sum, item) => sum + Number(item.quoteVolume || 0), 0);
     const taker = recent.reduce((sum, item) => sum + Number(item.takerBuyQuoteVolume || 0), 0);
-    if (quote > 0 && taker > 0) {
+    if (quote > 0 && taker >= 0) {
       const ratio = taker / quote;
-      if (ratio >= 0.56) add(5, "agressão", `Compradores tomaram ${(ratio * 100).toFixed(0)}% do volume`, "Agressão estimada pelas velas fechadas recentes.");
-      else if (ratio <= 0.44) add(-5, "agressão", `Vendedores tomaram ${((1 - ratio) * 100).toFixed(0)}% do volume`, "Agressão estimada pelas velas fechadas recentes.");
+      if (ratio >= 0.56) add(5, "agressão", `Compradores tomaram ${(ratio * 100).toFixed(0)}% do volume fechado`, "Agressão estimada por velas confirmadas.");
+      else if (ratio <= 0.44) add(-5, "agressão", `Vendedores tomaram ${((1 - ratio) * 100).toFixed(0)}% do volume fechado`, "Agressão estimada por velas confirmadas.");
     }
   }
-  if (Number.isFinite(micro.spreadPct) && micro.spreadPct > 0.08) add(-3, "liquidez", "Spread elevado", "Execução pode sofrer mais derrapagem.");
 
-  let rawScore = reasons.reduce((sum, reason) => sum + reason.points, 0);
-  rawScore = clamp(rawScore, -100, 100);
+  const rawSum = reasons.reduce((sum, reason) => sum + reason.points, 0);
+  const rawScore = clamp(rawSum, -100, 100);
+  const directionSign = Math.sign(rawScore);
+  const aligned = reasons.filter((reason) => Math.sign(reason.points) === directionSign);
+  const conflicting = reasons.filter((reason) => Math.sign(reason.points) === -directionSign);
+  const alignedStrength = aligned.reduce((sum, reason) => sum + Math.abs(reason.points), 0);
+  const conflictStrength = conflicting.reduce((sum, reason) => sum + Math.abs(reason.points), 0);
   const adxValue = at(adx14);
-  const volatilityPct = percent(atrValue, price);
-  const trendQuality = adxValue == null ? 0.45 : clamp(adxValue / 45, 0, 1);
-  const evidenceGroups = new Set(reasons.filter((reason) => Math.sign(reason.points) === Math.sign(rawScore)).map((reason) => reason.group)).size;
-  const conflictingGroups = new Set(reasons.filter((reason) => Math.sign(reason.points) !== Math.sign(rawScore)).map((reason) => reason.group)).size;
-  const rawConfidence = 34 + evidenceGroups * 7 + trendQuality * 18 + Math.min(volumeRatio, 2) * 4 - conflictingGroups * 2;
-  const confidence = Math.round(clamp(rawConfidence * (Number(calibration?.confidenceFactor) || 1), 28, 92));
-  const minimum = (confidence >= 68 ? 24 : 30) + clamp(Number(calibration?.thresholdAdjustment) || 0, -2, 5);
+  const trendAligned = Number.isFinite(adxValue) && structure.bias !== 0 && Math.sign(structure.bias) === directionSign;
+  const trendQuality = trendAligned ? clamp(adxValue / 45, 0, 1) : 0;
+  const evidenceGroups = new Set(aligned.map((reason) => reason.group)).size;
+  const conflictingGroups = new Set(conflicting.map((reason) => reason.group)).size;
+  const strengthQuality = alignedStrength + conflictStrength ? alignedStrength / (alignedStrength + conflictStrength) : 0;
+  const volumeQuality = Number.isFinite(volumeRatio) ? clamp(volumeRatio / 2, 0, 1) : 0;
+  let rawConfidence = 10 + evidenceGroups * 7 + strengthQuality * 35 + trendQuality * 12 + volumeQuality * 5 - conflictingGroups * 5;
+  if (Number.isFinite(micro.spreadPct) && micro.spreadPct > 0.08) rawConfidence -= Math.min(20, micro.spreadPct * 80);
+  const confidence = Math.round(clamp(rawConfidence * (Number(calibration?.confidenceFactor) || 1), 0, 92));
+  const minimum = 30 + clamp(Number(calibration?.thresholdAdjustment) || 0, -2, 5);
   const signal = rawScore >= minimum ? "COMPRA" : rawScore <= -minimum ? "VENDA" : "AGUARDE";
+  const volatilityPct = percent(atrValue, price);
+  const volatilityLimit = { "1m": 0.8, "3m": 1.1, "5m": 1.4, "15m": 2.2, "30m": 3, "1h": 4, "2h": 5, "4h": 7, "6h": 9, "8h": 10, "12h": 12, "1d": 18 }[cleanIntervalValue];
   const warnings = [];
-  if (volatilityPct > 2.2) warnings.push("Volatilidade extrema: reduza o tamanho da posição.");
-  if (volumeRatio < 0.55) warnings.push("Volume fraco: rompimentos têm menor qualidade.");
-  if (micro.stale) warnings.push("Dados ao vivo estão atrasados; aguarde a reconexão.");
-  if (signal !== "AGUARDE" && Math.sign(structure.bias) !== Math.sign(rawScore) && structure.bias !== 0) warnings.push("Sinal está contra a estrutura principal.");
+  if (volatilityPct > volatilityLimit) warnings.push("Volatilidade extrema para este tempo gráfico: reduza o tamanho da posição.");
+  if (!Number.isFinite(volumeRatio)) warnings.push("Volume indisponível: VWAP e confirmação de volume não influenciaram a leitura.");
+  else if (volumeRatio < 0.55) warnings.push("Volume fraco: rompimentos têm menor qualidade.");
+  if (micro.stale !== false && SHORT_MICRO_INTERVALS.has(cleanIntervalValue)) warnings.push("Microestrutura indisponível ou atrasada; book e agressão foram excluídos do score.");
+  if (Number.isFinite(micro.spreadPct) && micro.spreadPct > 0.08) warnings.push("Spread elevado reduziu a qualidade, sem criar viés de compra ou venda.");
+  if (signal !== "AGUARDE" && structure.bias !== 0 && Math.sign(structure.bias) !== Math.sign(rawScore)) warnings.push("Sinal contra a estrutura principal: o plano foi bloqueado.");
   if (conflictingGroups >= 3) warnings.push("Existem grupos técnicos conflitantes; a leitura exige confirmação adicional.");
-  if ((calibration?.samples || 0) > 12 && Number(calibration.reliability) < 0.46) warnings.push("A calibração recente está abaixo do esperado; o painel elevou o filtro de entrada.");
-
-  const lastCandle = at(candles);
-  const ageMs = Math.max(0, Date.now() - Number(lastCandle.closeTime || lastCandle.t || Date.now()));
-  const freshnessScore = micro.stale ? 25 : ageMs > 12 * 60 * 60 * 1000 ? 55 : 100;
-  const liquidityScore = Number.isFinite(micro.spreadPct) ? Math.round(clamp(100 - micro.spreadPct * 900, 20, 100)) : 72;
-  const completenessScore = lastCandle.closed === false ? 88 : 100;
+  if (validation.gaps) warnings.push(`A série possui ${validation.gaps} gap(s) temporal(is); interprete com cautela.`);
+  const latest = at(calc);
+  const latestDataAt = Number(latest.closeTime || latest.t);
+  const ageMs = Math.max(0, now - latestDataAt);
+  const expectedAge = INTERVAL_MS[cleanIntervalValue] * 1.5;
+  const freshnessScore = ageMs > expectedAge * 3 ? 0 : ageMs > expectedAge ? 45 : 100;
+  const liquidityScore = Number.isFinite(micro.spreadPct) ? Math.round(clamp(100 - micro.spreadPct * 900, 0, 100)) : 65;
+  const completenessScore = validation.gaps ? Math.max(30, 100 - validation.gaps * 10) : 100;
   const dataQualityScore = Math.round(freshnessScore * 0.45 + liquidityScore * 0.35 + completenessScore * 0.2);
+  const contraStructure = signal !== "AGUARDE" && structure.bias !== 0 && Math.sign(structure.bias) !== Math.sign(rawScore);
+  const plan = contraStructure ? null : buildRiskPlan({ signal, price, atrValue, levels, account, riskPct, spreadPct: micro.spreadPct });
 
   return {
-    symbol,
-    interval,
-    ts: Date.now(),
-    price: priceRound(price),
-    signal,
-    score: rawScore,
-    confidence,
-    confidenceMeaning: "qualidade da confluência, não probabilidade garantida de lucro",
-    regime: structure.regime,
-    structure,
-    candle,
-    reasons: reasons.sort((a, b) => Math.abs(b.points) - Math.abs(a.points)),
-    warnings,
-    dataQuality: {
-      score: dataQualityScore,
-      freshness: freshnessScore,
-      liquidity: liquidityScore,
-      completeness: completenessScore,
-      lastCandleClosed: lastCandle.closed !== false,
-      ageMs,
-      conflictingGroups,
-      samples: candles.length,
-    },
-    calibration: calibration ? {
-      samples: calibration.samples || 0,
-      reliability: Number(calibration.reliability || 0.5),
-      state: (calibration.samples || 0) < 12 ? "aquecendo" : (calibration.samples || 0) < 60 ? "calibrando" : "maduro",
-      adjusted: (calibration.samples || 0) >= 12,
-    } : { samples: 0, reliability: 0.5, state: "aquecendo", adjusted: false },
-    indicators: {
-      ema9: priceRound(at(ema9)), ema20: priceRound(at(ema20)), ema50: priceRound(at(ema50)), ema200: priceRound(at(ema200)),
-      rsi: I.round(rsiValue, 2), macd: priceRound(at(macd.line)), macdSignal: priceRound(at(macd.signal)), macdHistogram: priceRound(hist),
-      bollingerUpper: priceRound(at(bb.upper)), bollingerMiddle: priceRound(at(bb.middle)), bollingerLower: priceRound(at(bb.lower)), bollingerPercentB: I.round(at(bb.percentB), 3), bandwidth: I.round(at(bb.bandwidth), 4),
-      atr: priceRound(atrValue), atrPct: I.round(volatilityPct, 3), vwap: priceRound(vwapValue), adx: I.round(adxValue, 2),
-      stochasticK: I.round(at(stochastic.k), 2), stochasticD: I.round(at(stochastic.d), 2), obvSlope: I.round(obvSlope, 2), roc: I.round(at(roc), 3), volumeRatio: I.round(volumeRatio, 2),
-    },
-    levels: {
-      supports: levels.supports.map((level) => ({ price: priceRound(level.price), touches: level.touches, distancePct: I.round(level.distancePct, 3) })),
-      resistances: levels.resistances.map((level) => ({ price: priceRound(level.price), touches: level.touches, distancePct: I.round(level.distancePct, 3) })),
-      volumeProfile: profile,
-    },
-    micro: {
-      spreadPct: I.round(micro.spreadPct, 4), bookImbalance: I.round(micro.bookImbalance, 4), buyRatio: I.round(micro.buyRatio, 4), delta: I.round(micro.delta, 4),
-    },
-    plan: buildRiskPlan({ signal, price, atrValue, levels, account, riskPct }),
-    series: {
-      candles: candles.slice(-260),
-      ema9: ema9.slice(-260).map(priceRound),
-      ema20: ema20.slice(-260).map(priceRound),
-      ema50: ema50.slice(-260).map(priceRound),
-      vwap: vwap.slice(-260).map(priceRound),
-    },
+    id: `${cleanSymbolValue}|${cleanIntervalValue}|${latest.t}|${now}`,
+    symbol: cleanSymbolValue, interval: cleanIntervalValue, ts: now, calculatedAt: now, latestCandleOpenTime: latest.t, latestCandleCloseTime: latest.closeTime || latest.t + INTERVAL_MS[cleanIntervalValue] - 1,
+    marketDataAgeMs: ageMs, microDataAgeMs: Number.isFinite(micro.ageMs) ? micro.ageMs : null, price: priceRound(price), signal, score: rawScore, rawScoreSum: rawSum, threshold: minimum, confidence,
+    confidenceMeaning: "qualidade das evidências alinhadas, não probabilidade garantida de lucro", regime: structure.regime, structure, candle,
+    reasons: reasons.sort((a, b) => Math.abs(b.points) - Math.abs(a.points)), warnings,
+    dataQuality: { score: dataQualityScore, freshness: freshnessScore, liquidity: liquidityScore, completeness: completenessScore, lastCandleClosed: true, ageMs, conflictingGroups, samples: calc.length, gaps: validation.gaps },
+    calibration: calibration ? { samples: calibration.samples || 0, reliability: Number(calibration.reliability || 0.5), state: (calibration.samples || 0) < 12 ? "aquecendo" : (calibration.samples || 0) < 60 ? "calibrando" : "maduro", adjusted: (calibration.samples || 0) >= 12 } : { samples: 0, reliability: 0.5, state: "aquecendo", adjusted: false },
+    indicators: { ema9: priceRound(at(ema9)), ema20: priceRound(at(ema20)), ema50: priceRound(at(ema50)), ema200: priceRound(at(ema200)), rsi: I.round(rsiValue, 2), macd: priceRound(at(macd.line)), macdSignal: priceRound(at(macd.signal)), macdHistogram: priceRound(hist), bollingerUpper: priceRound(at(bb.upper)), bollingerMiddle: priceRound(at(bb.middle)), bollingerLower: priceRound(at(bb.lower)), bollingerPercentB: I.round(at(bb.percentB), 3), bandwidth: I.round(at(bb.bandwidth), 4), atr: priceRound(atrValue), atrPct: I.round(volatilityPct, 3), vwap: vwapAllowed ? priceRound(vwapValue) : null, adx: I.round(adxValue, 2), stochasticK: I.round(at(stochastic.k), 2), stochasticD: I.round(at(stochastic.d), 2), obvSlope: I.round(obvSlope, 2), roc: I.round(at(roc), 3), volumeRatio: I.round(volumeRatio, 2) },
+    levels: { supports: levels.supports.map((level) => ({ price: priceRound(level.price), touches: level.touches, supportTouches: level.supportTouches, resistanceTouches: level.resistanceTouches, strength: level.strength, role: level.role, distancePct: I.round(level.distancePct, 3) })), resistances: levels.resistances.map((level) => ({ price: priceRound(level.price), touches: level.touches, supportTouches: level.supportTouches, resistanceTouches: level.resistanceTouches, strength: level.strength, role: level.role, distancePct: I.round(level.distancePct, 3) })), atPrice: levels.atPrice, volumeProfile: profile },
+    micro: { used: useMicro, stale: micro.stale !== false, spreadPct: I.round(micro.spreadPct, 4), bookImbalance: useMicro ? I.round(micro.bookImbalance, 4) : null, buyRatio: useMicro ? I.round(micro.buyRatio, 4) : null, delta: useMicro ? I.round(micro.delta, 4) : null, deltaQuote: useMicro ? I.round(micro.deltaQuote, 2) : null },
+    plan,
+    series: { candles: calc.slice(-500), ema9: ema9.slice(-500).map(priceRound), ema20: ema20.slice(-500).map(priceRound), ema50: ema50.slice(-500).map(priceRound), vwap: vwap.slice(-500).map(priceRound) },
   };
 }
 
-function combineTimeframes(results) {
-  const weights = { "1m": 0.7, "3m": 0.8, "5m": 1, "15m": 1.25, "30m": 1.35, "1h": 1.6, "4h": 1.9 };
-  const entries = Object.entries(results).filter(([, value]) => value && !value.error);
-  const totalWeight = entries.reduce((sum, [interval]) => sum + (weights[interval] || 1), 0) || 1;
-  const weightedScore = entries.reduce((sum, [interval, value]) => sum + value.score * (weights[interval] || 1), 0) / totalWeight;
-  const direction = weightedScore >= 18 ? "COMPRA" : weightedScore <= -18 ? "VENDA" : "AGUARDE";
-  const aligned = entries.filter(([, value]) => value.signal === direction).length;
+function combineTimeframes(results, { expectedFrames = Object.keys(results), minimumCoverage = 0.6 } = {}) {
+  const weights = { "1m": 0.7, "3m": 0.8, "5m": 1, "15m": 1.25, "30m": 1.35, "1h": 1.6, "2h": 1.75, "4h": 1.9, "1d": 2.2 };
+  const available = expectedFrames.filter((interval) => results[interval] && !results[interval].error);
+  const failed = expectedFrames.filter((interval) => !results[interval] || results[interval].error).map((interval) => ({ interval, error: results[interval]?.error || "indisponível" }));
+  const coverage = expectedFrames.length ? available.length / expectedFrames.length : 0;
+  if (!available.length) return { status: "unavailable", signal: "INDISPONÍVEL", score: null, scoreExact: null, alignment: 0, available: 0, expected: expectedFrames.length, coverage: 0, frames: {}, failed };
+  const effectiveWeight = (interval, value) => (weights[interval] || 1) * clamp(Number(value.confidence || 0) / 100, 0.1, 0.92) * clamp(Number(value.dataQuality?.score || 0) / 100, 0.1, 1);
+  const totalWeight = available.reduce((sum, interval) => sum + effectiveWeight(interval, results[interval]), 0) || 1;
+  const weightedScore = available.reduce((sum, interval) => sum + results[interval].score * effectiveWeight(interval, results[interval]), 0) / totalWeight;
+  const directional = available.filter((interval) => ["COMPRA", "VENDA"].includes(results[interval].signal));
+  const buyWeight = directional.filter((interval) => results[interval].signal === "COMPRA").reduce((sum, interval) => sum + effectiveWeight(interval, results[interval]), 0);
+  const sellWeight = directional.filter((interval) => results[interval].signal === "VENDA").reduce((sum, interval) => sum + effectiveWeight(interval, results[interval]), 0);
+  const candidate = weightedScore >= 30 && buyWeight > sellWeight ? "COMPRA" : weightedScore <= -30 && sellWeight > buyWeight ? "VENDA" : "AGUARDE";
+  const directionWeight = candidate === "COMPRA" ? buyWeight : candidate === "VENDA" ? sellWeight : 0;
+  const alignment = totalWeight ? Math.round((directionWeight / totalWeight) * 100) : 0;
+  const signal = coverage < minimumCoverage ? "AGUARDE" : candidate;
   return {
-    signal: direction,
-    score: Math.round(weightedScore),
-    alignment: entries.length ? Math.round((aligned / entries.length) * 100) : 0,
-    frames: Object.fromEntries(entries.map(([interval, value]) => [interval, { signal: value.signal, score: value.score, regime: value.regime, price: value.price }])),
+    status: coverage < minimumCoverage ? "partial" : "ready", signal, candidate, score: Math.round(weightedScore), scoreExact: Number(weightedScore.toFixed(4)), alignment,
+    available: available.length, expected: expectedFrames.length, coverage: Math.round(coverage * 100), failed,
+    frames: Object.fromEntries(available.map((interval) => { const value = results[interval]; return [interval, { signal: value.signal, score: value.score, confidence: value.confidence, dataQuality: value.dataQuality?.score, regime: value.regime, price: value.price, ts: value.ts }]; })),
   };
 }
 
-module.exports = { analyze, combineTimeframes, validateCandles, detectPivots, supportResistance, candleReading, buildRiskPlan };
+function applyMtfGate(analysis, multiTimeframe) {
+  const gated = structuredClone(analysis);
+  gated.singleTimeframeSignal = analysis.signal;
+  gated.multiTimeframe = multiTimeframe;
+  const compatible = multiTimeframe?.status === "ready" && multiTimeframe.signal === analysis.signal && analysis.signal !== "AGUARDE";
+  if (!compatible) {
+    gated.signal = "AGUARDE";
+    gated.plan = null;
+    const reason = multiTimeframe?.status === "unavailable" ? "Confluência multi-timeframe indisponível." : multiTimeframe?.coverage < 60 ? `Cobertura MTF insuficiente (${multiTimeframe.coverage || 0}%).` : `Sinal individual ${analysis.signal} não foi confirmado pelo MTF (${multiTimeframe?.signal || "indisponível"}).`;
+    gated.warnings = [reason, ...(gated.warnings || [])];
+  }
+  return gated;
+}
+
+module.exports = { analyze, combineTimeframes, applyMtfGate, validateCandles, detectPivots, clusterLevels, supportResistance, candleReading, buildRiskPlan, INTERVAL_MS };
