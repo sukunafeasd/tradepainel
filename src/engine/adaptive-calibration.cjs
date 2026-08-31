@@ -3,13 +3,15 @@
 const { JsonStore } = require("./storage.cjs");
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const INTERVAL_MS = { "1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000, "2h": 7200000, "4h": 14400000, "6h": 21600000, "8h": 28800000, "12h": 43200000, "1d": 86400000 };
 const initial = (now = Date.now()) => ({
   schemaVersion: SCHEMA_VERSION,
   samples: 0,
   hits: 0,
   misses: 0,
   draws: 0,
+  skippedHorizon: 0,
   buckets: {},
   groups: {},
   recent: [],
@@ -25,6 +27,7 @@ function migrate(value) {
     buckets: value.buckets && typeof value.buckets === "object" && !Array.isArray(value.buckets) ? value.buckets : {},
     groups: value.groups && typeof value.groups === "object" && !Array.isArray(value.groups) ? value.groups : {},
     recent: Array.isArray(value.recent) ? value.recent.slice(-250) : [],
+    skippedHorizon: Number(value.skippedHorizon) || 0,
   };
 }
 
@@ -57,26 +60,35 @@ class AdaptiveCalibrator {
 
   profile({ symbol = "GLOBAL", interval = "15m" } = {}) {
     const data = this.store.value;
-    const keys = ["global", `interval:${interval}`, `symbol:${symbol}`, `pair:${symbol}|${interval}`];
+    const pairKey = `pair:${symbol}|${interval}`;
+    const keys = [pairKey];
     const entries = keys.map((key) => data.buckets[key]).filter(Boolean);
     const evidence = entries.reduce((sum, item) => sum + item.samples, 0);
     const weighted = entries.reduce((sum, item) => sum + bayesianReliability(item) * Math.sqrt(Math.max(1, item.samples)), 0);
     const weight = entries.reduce((sum, item) => sum + Math.sqrt(Math.max(1, item.samples)), 0) || 1;
     const reliability = evidence ? weighted / weight : 0.5;
+    const pairSamples = Number(data.buckets[pairKey]?.samples || 0);
+    const applied = pairSamples >= 30;
     const groups = {};
-    for (const [name, value] of Object.entries(data.groups)) {
+    const groupPrefix = `group:${symbol}|${interval}|`;
+    for (const [key, value] of Object.entries(data.groups)) {
+      if (!key.startsWith(groupPrefix)) continue;
+      const name = key.slice(groupPrefix.length);
       const rate = bayesianReliability(value, 14, 0.5);
       const maturity = clamp(value.samples / 40, 0, 1);
-      groups[name] = Number(clamp(1 + (rate - 0.5) * 0.8 * maturity, 0.82, 1.18).toFixed(4));
+      groups[name] = applied ? Number(clamp(1 + (rate - 0.5) * 0.6 * maturity, 0.88, 1.12).toFixed(4)) : 1;
     }
-    const maturity = clamp(data.samples / 60, 0, 1);
+    const maturity = clamp(pairSamples / 60, 0, 1);
     return {
       enabled: true,
       samples: data.samples,
+      pairSamples,
+      applied,
       reliability: Number(reliability.toFixed(4)),
-      confidenceFactor: Number(clamp(1 + (reliability - 0.5) * 0.45 * maturity, 0.88, 1.08).toFixed(4)),
-      thresholdAdjustment: Math.round(clamp((0.5 - reliability) * 18 * maturity, -2, 5)),
+      confidenceFactor: applied ? Number(clamp(1 + (reliability - 0.5) * 0.3 * maturity, 0.94, 1.05).toFixed(4)) : 1,
+      thresholdAdjustment: applied ? Math.round(clamp((0.5 - reliability) * 12 * maturity, -1, 3)) : 0,
       groupWeights: groups,
+      methodology: "Somente resultados com duração compatível com o timeframe; pesos isolados por par e timeframe.",
       updatedAt: data.updatedAt,
     };
   }
@@ -87,6 +99,14 @@ class AdaptiveCalibrator {
     for (const trade of trades) {
       const reading = trade.analysisSnapshot;
       if (!reading || !["COMPRA", "VENDA"].includes(reading.signal)) continue;
+      if (trade.result === "unresolved") continue;
+      const expectedHorizonMs = Number(reading.expectedHorizonMs || INTERVAL_MS[reading.interval]);
+      const tradeDurationMs = Number(trade.durationMs);
+      if (!(expectedHorizonMs > 0) || !(tradeDurationMs >= expectedHorizonMs * 0.8)) {
+        data.skippedHorizon = (data.skippedHorizon || 0) + 1;
+        data.recent.push({ at: Number(trade.closedAt) || this.now(), symbol: reading.symbol, interval: reading.interval, predicted: reading.signal, skipped: true, reason: "horizonte_incompativel", tradeDurationMs: Number.isFinite(tradeDurationMs) ? tradeDurationMs : null, expectedHorizonMs });
+        data.recent = data.recent.slice(-250); changed = true; continue;
+      }
       const delta = Number(trade.exitPrice) - Number(trade.entryPrice);
       if (!Number.isFinite(delta) || Math.abs(delta) <= Math.abs(Number(trade.entryPrice)) * 1e-10) {
         data.draws += 1;
@@ -103,7 +123,8 @@ class AdaptiveCalibrator {
       for (const reason of reading.reasons || []) {
         const points = Number(reason.points);
         if (!Number.isFinite(points) || points === 0 || !reason.group) continue;
-        update(bucket(data.groups, String(reason.group).slice(0, 60)), Math.sign(points) === (actual === "COMPRA" ? 1 : -1));
+        const groupName = String(reason.group).slice(0, 60);
+        update(bucket(data.groups, `group:${reading.symbol}|${reading.interval}|${groupName}`), Math.sign(points) === (actual === "COMPRA" ? 1 : -1));
       }
       data.recent.push({
         at: Number(trade.closedAt) || this.now(),
@@ -133,6 +154,7 @@ class AdaptiveCalibrator {
       hits: data.hits,
       misses: data.misses,
       draws: data.draws,
+      skippedHorizon: data.skippedHorizon || 0,
       accuracy: accuracy == null ? null : Number(accuracy.toFixed(2)),
       learning: data.samples < 12 ? "aquecendo" : data.samples < 60 ? "calibrando" : "maduro",
       recent: data.recent.slice(-30).reverse(),
@@ -156,9 +178,10 @@ class AdaptiveCalibrator {
       confidence: analysis.confidence,
       regime: analysis.regime,
       reasons: (analysis.reasons || []).slice(0, 20).map(({ group, points }) => ({ group, points })),
+      expectedHorizonMs: INTERVAL_MS[analysis.interval] || null,
       at: analysis.ts,
     };
   }
 }
 
-module.exports = { AdaptiveCalibrator, bayesianReliability };
+module.exports = { AdaptiveCalibrator, bayesianReliability, INTERVAL_MS };

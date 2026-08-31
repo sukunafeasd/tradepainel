@@ -4,7 +4,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createServer } = require("../src/server.cjs");
+const { createServer, createSseWriter } = require("../src/server.cjs");
+const EventEmitter = require("node:events");
 
 class FakeLive {
   constructor(){this.symbol="BTCUSDT";this.interval="15m";this.state={ticker:{last:50000}};}
@@ -58,4 +59,12 @@ test("fronteira HTTP rejeita origem, token em query, método e payload anômalo"
     const large=await fetch(`${base}/api/paper/reset`,{method:"POST",headers:{"X-Dief-Token":token,"Content-Type":"application/json"},body:JSON.stringify({value:"x".repeat(140000)})});assert.equal(large.status,413);
     const missing=await fetch(`${base}/missing.js`);assert.equal(missing.status,404);assert.equal(missing.headers.get("x-content-type-options"),"nosniff");
   } finally {await app.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test("SSE preserva eventos críticos durante backpressure e consolida snapshots", () => {
+  class FakeResponse extends EventEmitter { constructor(){super();this.destroyed=false;this.chunks=[];this.first=true;} write(chunk){this.chunks.push(chunk);if(this.first){this.first=false;return false;}return true;} }
+  const res=new FakeResponse(),writer=createSseWriter(res,{maxQueue:4});
+  writer.send("ready",{});writer.send("snapshot",{n:1});writer.send("snapshot",{n:2});writer.send("alert",{id:"a"});writer.send("paper-result",{id:"p"});
+  assert.equal(writer.diagnostics().blocked,true);res.emit("drain");const output=res.chunks.join("");
+  assert.doesNotMatch(output,/"n":1[^]*"n":2/);assert.match(output,/"n":2/);assert.match(output,/event: alert/);assert.match(output,/event: paper-result/);writer.close();
 });

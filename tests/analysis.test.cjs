@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { analyze, combineTimeframes, applyMtfGate, validateCandles } = require("../src/engine/analysis.cjs");
+const { analyze, combineTimeframes, applyMtfGate, validateCandles, buildRiskPlan } = require("../src/engine/analysis.cjs");
 
 const spacing = { "1m": 60_000, "15m": 900_000 };
 function candles(direction = 1, interval = "15m") {
@@ -51,4 +51,12 @@ test("candles fora de ordem, duplicadas ou insuficientes são rejeitadas", () =>
   assert.throws(() => validateCandles(rows.slice(0, 100), { interval: "1m" }), /200/);
   const duplicate = rows.map((row) => ({ ...row })); duplicate[100].t = duplicate[99].t;
   assert.throws(() => validateCandles(duplicate, { interval: "1m" }), /ordem|duplicado/i);
+});
+
+test("plano técnico mantém alvos no lado correto mesmo sem níveis úteis", () => {
+  const levels = { supports: [], resistances: [] };
+  const buy = buildRiskPlan({ signal: "COMPRA", price: 100, atrValue: 2, levels });
+  const sell = buildRiskPlan({ signal: "VENDA", price: 100, atrValue: 2, levels });
+  assert.ok(buy.target1 > buy.entry && buy.target2 > buy.entry && buy.stop < buy.entry);
+  assert.ok(sell.target1 < sell.entry && sell.target2 < sell.entry && sell.stop > sell.entry);
 });

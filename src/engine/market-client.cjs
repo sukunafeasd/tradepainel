@@ -175,11 +175,12 @@ class MarketClient {
 
   async ticker(symbol, { force = false } = {}) {
     const clean = cleanSymbol(symbol);
-    const book = await this.get("/api/v3/ticker/bookTicker", { symbol: clean }, 500, { force });
-    const lastResponse = await this.get("/api/v3/ticker/price", { symbol: clean }, 500, { force });
-    const last = finiteNumber(lastResponse.price, "Último preço", { min: Number.MIN_VALUE });
-    const bid = finiteNumber(book.bidPrice, "Bid", { min: Number.MIN_VALUE });
-    const ask = finiteNumber(book.askPrice, "Ask", { min: Number.MIN_VALUE });
+    // O ticker de 24 h entrega last/bid/ask no mesmo snapshot HTTP. Isso evita
+    // combinar respostas obtidas em instantes diferentes.
+    const snapshot = await this.get("/api/v3/ticker/24hr", { symbol: clean }, 500, { force });
+    const last = finiteNumber(snapshot.lastPrice, "Último preço", { min: Number.MIN_VALUE });
+    const bid = finiteNumber(snapshot.bidPrice, "Bid", { min: Number.MIN_VALUE });
+    const ask = finiteNumber(snapshot.askPrice, "Ask", { min: Number.MIN_VALUE });
     if (bid > ask) throw new Error("Ticker REST inválido: bid acima do ask.");
     const mid = (bid + ask) / 2;
     const receivedAt = this.clock.now();
@@ -189,11 +190,11 @@ class MarketClient {
   async priceAt(symbol, timestamp, { toleranceMs = 1500 } = {}) {
     const clean = cleanSymbol(symbol);
     const target = finiteNumber(timestamp, "Horário de expiração");
-    const rows = await this.get("/api/v3/aggTrades", { symbol: clean, startTime: Math.floor(target - toleranceMs), endTime: Math.ceil(target + toleranceMs), limit: 1000 }, 0, { force: true });
-    const candidates = (rows || []).map((row) => ({ value: Number(row.p), exchangeTimestamp: Number(row.T), id: row.a })).filter((row) => Number.isFinite(row.value) && row.value > 0 && Number.isFinite(row.exchangeTimestamp));
-    candidates.sort((a, b) => Math.abs(a.exchangeTimestamp - target) - Math.abs(b.exchangeTimestamp - target) || a.exchangeTimestamp - b.exchangeTimestamp);
+    const rows = await this.get("/api/v3/aggTrades", { symbol: clean, startTime: Math.floor(target - toleranceMs), endTime: Math.floor(target), limit: 1000 }, 0, { force: true });
+    const candidates = (rows || []).map((row) => ({ value: Number(row.p), exchangeTimestamp: Number(row.T), id: row.a })).filter((row) => Number.isFinite(row.value) && row.value > 0 && Number.isFinite(row.exchangeTimestamp) && row.exchangeTimestamp <= target);
+    candidates.sort((a, b) => b.exchangeTimestamp - a.exchangeTimestamp);
     const closest = candidates[0];
-    if (!closest || Math.abs(closest.exchangeTimestamp - target) > toleranceMs) return null;
+    if (!closest || target - closest.exchangeTimestamp > toleranceMs) return null;
     return validateMarketDatum({ symbol: clean, value: closest.value, exchangeTimestamp: closest.exchangeTimestamp, receivedAt: this.clock.now(), source: "binance-aggtrade-history", stale: false, tradeId: closest.id }, { symbol: clean, now: this.clock.now() });
   }
 

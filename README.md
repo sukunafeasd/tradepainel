@@ -41,6 +41,19 @@ pnpm build
 ```
 
 O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
+## Versão 0.7.0
+
+- Leitura complementar de IA com resposta estruturada, validação completa, timeout coerente, progresso visível e mensagens de erro úteis.
+- Falhas de rede, quota ou resposta inválida não consomem mais a leitura local; chamadas simultâneas são bloqueadas com segurança.
+- Liquidação demo com backoff exponencial e devolução automática se a cotação histórica continuar indisponível.
+- Estatísticas, drawdown, sequências e curva de patrimônio preservados além do limite do histórico visível.
+- Alertas de preço acompanham todos os pares do radar; alertas técnicos guardam o timeframe e funcionam em segundo plano.
+- Baseline de cruzamento persistida, SSE com fila para eventos críticos e proteção ampliada contra dados futuros ou atrasados.
+- Calibração isolada por par e timeframe, só após amostra madura e somente com operações de horizonte compatível.
+- Diário com busca, total e paginação; interface atualiza cronômetros sem reconstruir o painel duas vezes por segundo.
+- Cotação REST obtida em um snapshot consistente e liquidação histórica proibida de usar negócio posterior ao vencimento.
+- Schemas persistidos aprofundados e regressões da auditoria cobertas pela suíte automatizada.
+
 ## Versão 0.6.0
 
 - Chaves Gemini Auth (`AQ.`) e padrão aceitas, sempre criptografadas pelo Windows.

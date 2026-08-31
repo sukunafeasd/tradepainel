@@ -7,7 +7,10 @@ const { ExchangeClock } = require("./clock.cjs");
 
 const STREAM_HOSTS = ["wss://stream.binance.com:9443", "wss://stream.binance.com:443", "wss://data-stream.binance.vision"];
 const STABLES = new Set(["USDC", "FDUSD", "BUSD", "TUSD", "USDE", "DAI", "EUR", "AEUR", "BRL"]);
-const STREAM_FRESH_MS = { ticker: 5000, candle: 8000, book: 5000, flow: 5000 };
+const STREAM_FRESH_MS = { ticker: 10000, candle: 12000, book: 8000, flow: 10000 };
+const EVENT_FUTURE_TOLERANCE_MS = 2000;
+const EVENT_MAX_LAG_MS = 15000;
+const SYMBOL_SILENCE_RECONNECT_MS = 20000;
 
 const finitePositive = (value) => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const finiteNonnegative = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
@@ -41,8 +44,9 @@ class RealtimeHub extends EventEmitter {
     this.lastMarketEventMono = 0;
     this.marketOpenedMono = 0;
     this.symbolOpenedMono = 0;
+    this.lastSymbolEventMono = 0;
     this.clients = new Set();
-    this.metrics = { reconnects: 0, marketReconnects: 0, connectedAt: null, lastDisconnectAt: null, lastError: null, symbolHost: null, marketHost: null, malformedEvents: 0, duplicateTrades: 0, generation: 0 };
+    this.metrics = { reconnects: 0, marketReconnects: 0, connectedAt: null, lastDisconnectAt: null, lastError: null, symbolHost: null, marketHost: null, malformedEvents: 0, rejectedTimestamps: 0, duplicateTrades: 0, generation: 0 };
     this.flushTimer = null;
     this.staleTimer = null;
   }
@@ -79,6 +83,7 @@ class RealtimeHub extends EventEmitter {
     this.flowQueue = [];
     this.flowTotals = { buy: 0, sell: 0, buyQuote: 0, sellQuote: 0 };
     this.tradeIds.clear();
+    this.lastSymbolEventMono = 0;
     this.state = this.#blankState();
     try { old?.close(1000, "troca de mercado"); } catch {}
     if (!this.closed) this.#connectSymbol(this.symbolGeneration);
@@ -111,8 +116,9 @@ class RealtimeHub extends EventEmitter {
 
   datumAt(symbol, timestamp, toleranceMs = 1500) {
     const rows = this.priceHistory.get(cleanSymbol(symbol)) || [];
-    const best = rows.reduce((closest, item) => Math.abs(item.exchangeTimestamp - timestamp) < Math.abs((closest?.exchangeTimestamp ?? Infinity) - timestamp) ? item : closest, null);
-    return best && Math.abs(best.exchangeTimestamp - timestamp) <= toleranceMs ? structuredClone(best) : null;
+    const eligible = rows.filter((item) => item.source === "binance-aggtrade" && item.exchangeTimestamp <= timestamp && timestamp - item.exchangeTimestamp <= toleranceMs);
+    const best = eligible.sort((a, b) => b.exchangeTimestamp - a.exchangeTimestamp)[0];
+    return best ? structuredClone(best) : null;
   }
 
   addClient(send) {
@@ -148,9 +154,9 @@ class RealtimeHub extends EventEmitter {
           if (STABLES.has(base) || /(UP|DOWN|BULL|BEAR)$/.test(base)) continue;
           const last = finitePositive(row.c); const open = finitePositive(row.o); const high = finitePositive(row.h); const low = finitePositive(row.l); const volume = finiteNonnegative(row.v); const quoteVolume = finiteNonnegative(row.q);
           const eventTime = Number.isFinite(Number(row.E)) ? Number(row.E) : receivedAt;
-          if (!(last && open && high && low && volume != null && quoteVolume != null && eventTime <= receivedAt + 60000)) continue;
+          if (!(last && open && high && low && volume != null && quoteVolume != null) || !this.#validEventTimestamp(eventTime, receivedAt)) { this.metrics.rejectedTimestamps += 1; continue; }
           this.market.set(symbol, { symbol, base, quote: "USDT", last, changePct: ((last / open) - 1) * 100, high, low, volume, quoteVolume, eventTime, receivedAt, receivedMono: nowMono, live: true });
-          this.#rememberPrice({ symbol, value: last, exchangeTimestamp: eventTime, receivedAt, source: "binance-mini-ticker", stale: false });
+          this.emit("market-price", { symbol, value: last, exchangeTimestamp: eventTime, receivedAt, source: "binance-mini-ticker", stale: false });
           accepted += 1;
         }
         if (!accepted) return;
@@ -181,7 +187,7 @@ class RealtimeHub extends EventEmitter {
     socket.on("message", (raw) => this.#handleMessage(raw, { socket, generation, symbol: selectedSymbol, interval: selectedInterval }));
     socket.on("close", () => {
       if (generation !== this.symbolGeneration || socket !== this.socket) return;
-      this.socket = null; this.symbolOpenedMono = 0; this.state.connected = false; this.state.stale = true; this.state.dirty = true; this.metrics.reconnects += 1; this.metrics.lastDisconnectAt = this.clock.now();
+      this.socket = null; this.symbolOpenedMono = 0; this.lastSymbolEventMono = 0; this.state.connected = false; this.state.stale = true; this.state.dirty = true; this.metrics.reconnects += 1; this.metrics.lastDisconnectAt = this.clock.now();
       if (!this.closed) { this.symbolHostIndex = (this.symbolHostIndex + 1) % this.streamHosts.length; const delay = Math.min(15000, this.reconnectBaseMs * (2 ** Math.min(this.retry++, 4))) + Math.random() * 300; this.symbolReconnectTimer = setTimeout(() => this.#connectSymbol(generation), delay); }
     });
     socket.on("error", (error) => { this.metrics.lastError = error?.message || "Falha no fluxo"; try { socket.terminate(); } catch {} });
@@ -191,6 +197,16 @@ class RealtimeHub extends EventEmitter {
     this.state.freshness[component] = { exchangeTimestamp, receivedAt, receivedMono, ageMs: 0, stale: false };
     this.state.lastEventAt = Math.max(this.state.lastEventAt, receivedAt);
     this.state.connected = true;
+  }
+
+  #validEventTimestamp(exchangeTimestamp, receivedAt) {
+    return Number.isFinite(Number(exchangeTimestamp)) && Number(exchangeTimestamp) <= receivedAt + EVENT_FUTURE_TOLERANCE_MS && Number(exchangeTimestamp) >= receivedAt - EVENT_MAX_LAG_MS;
+  }
+
+  #connectionStale(nowMono = performance.now()) {
+    const activity = this.lastSymbolEventMono || this.symbolOpenedMono;
+    if (!activity || nowMono - activity > SYMBOL_SILENCE_RECONNECT_MS) return true;
+    return !["candle", "book", "ticker"].some((component) => this.state.freshness[component] && !this.state.freshness[component].stale);
   }
 
   #rememberPrice(datum) {
@@ -215,11 +231,12 @@ class RealtimeHub extends EventEmitter {
         if (!k || String(k.s || data.s || "").toUpperCase() !== context.symbol || String(k.i || "") !== context.interval) return;
         const candle = { t: Number(k.t), closeTime: Number(k.T), open: finitePositive(k.o), high: finitePositive(k.h), low: finitePositive(k.l), close: finitePositive(k.c), volume: finiteNonnegative(k.v), quoteVolume: finiteNonnegative(k.q), trades: finiteNonnegative(k.n), takerBuyVolume: finiteNonnegative(k.V), closed: Boolean(k.x) };
         if (!Number.isFinite(candle.t) || !Number.isFinite(candle.closeTime) || !candle.open || !candle.high || !candle.low || !candle.close || candle.volume == null || candle.high < Math.max(candle.open, candle.close) || candle.low > Math.min(candle.open, candle.close)) return;
-        this.state.candle = candle; this.#fresh("candle", Number(data.E || k.T), receivedAt, receivedMono); accepted = true;
+        const eventTime = Number(data.E || receivedAt); if (!this.#validEventTimestamp(eventTime, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
+        this.state.candle = candle; this.#fresh("candle", eventTime, receivedAt, receivedMono); accepted = true;
       } else if (data.e === "aggTrade") {
         if (String(data.s || "").toUpperCase() !== context.symbol) return;
         const trade = { id: String(data.a), t: Number(data.T), price: finitePositive(data.p), quantity: finitePositive(data.q), side: data.m ? "sell" : "buy" };
-        if (!Number.isFinite(trade.t) || !trade.price || !trade.quantity || trade.t > receivedAt + 60000) return;
+        if (!Number.isFinite(trade.t) || !trade.price || !trade.quantity || !this.#validEventTimestamp(trade.t, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
         if (this.tradeIds.has(trade.id)) { this.metrics.duplicateTrades += 1; return; }
         this.tradeIds.set(trade.id, trade.t);
         this.flowQueue.push(trade);
@@ -248,18 +265,21 @@ class RealtimeHub extends EventEmitter {
         const mid = (bids[0][0] + asks[0][0]) / 2;
         const weighted = (rows) => rows.reduce((sum, [price, quantity]) => sum + quantity / (1 + Math.abs(price - mid) / mid * 1000), 0);
         const bidVolume = weighted(bids); const askVolume = weighted(asks);
+        const eventTime = Number(data.E || receivedAt); if (!this.#validEventTimestamp(eventTime, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
         this.state.book = { bids, asks, bidVolume, askVolume, imbalance: bidVolume + askVolume ? bidVolume / (bidVolume + askVolume) : 0.5 };
-        this.#fresh("book", Number(data.E || receivedAt), receivedAt, receivedMono); accepted = true;
+        this.#fresh("book", eventTime, receivedAt, receivedMono); accepted = true;
       } else if (data.b && data.a && data.B != null && data.A != null) {
         if (data.s && String(data.s).toUpperCase() !== context.symbol) return;
         const bid = finitePositive(data.b); const ask = finitePositive(data.a); const bidQuantity = finiteNonnegative(data.B); const askQuantity = finiteNonnegative(data.A);
         if (!bid || !ask || bid > ask || bidQuantity == null || askQuantity == null) return;
         const mid = (bid + ask) / 2;
+        const eventTime = Number(data.E || receivedAt); if (!this.#validEventTimestamp(eventTime, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
         this.state.ticker = { ...(this.state.ticker || {}), bid, ask, bidQuantity, askQuantity, spread: ask - bid, spreadPct: ((ask - bid) / mid) * 100 };
-        this.#fresh("book", Number(data.E || receivedAt), receivedAt, receivedMono); accepted = true;
+        this.#fresh("book", eventTime, receivedAt, receivedMono); accepted = true;
       }
       if (!accepted) return;
-      this.state.stale = Object.keys(STREAM_FRESH_MS).some((component) => !this.state.freshness[component] || this.state.freshness[component].stale);
+      this.lastSymbolEventMono = receivedMono;
+      this.state.stale = this.#connectionStale(receivedMono);
       this.state.dirty = true;
     } catch (error) { this.metrics.malformedEvents += 1; this.emit("warning", error); }
   }
@@ -274,9 +294,10 @@ class RealtimeHub extends EventEmitter {
       if (stale !== item.stale || Math.abs(item.ageMs - ageMs) > 500) changed = true;
       item.ageMs = ageMs; item.stale = stale;
     }
-    const stale = Object.keys(STREAM_FRESH_MS).some((component) => !this.state.freshness[component] || this.state.freshness[component].stale);
+    const stale = this.#connectionStale(nowMono);
     if (stale !== this.state.stale) { this.state.stale = stale; changed = true; }
-    if (stale && this.socket?.readyState === this.WebSocketImpl.OPEN && this.symbolOpenedMono && nowMono - this.symbolOpenedMono > 10000) { const socket = this.socket; this.metrics.lastError = "Fluxo aberto sem mensagens válidas; reconectando."; try { socket.terminate(); } catch {} }
+    const symbolActivity = this.lastSymbolEventMono || this.symbolOpenedMono;
+    if (this.socket?.readyState === this.WebSocketImpl.OPEN && symbolActivity && nowMono - symbolActivity > SYMBOL_SILENCE_RECONNECT_MS) { const socket = this.socket; this.metrics.lastError = "Fluxo aberto sem nenhuma mensagem válida; reconectando."; try { socket.terminate(); } catch {} }
     const marketActivity = this.lastMarketEventMono || this.marketOpenedMono;
     if (this.marketSocket?.readyState === this.WebSocketImpl.OPEN && marketActivity && nowMono - marketActivity > 20000) { this.metrics.lastError = "Radar aberto sem miniTicker; reconectando."; try { this.marketSocket.terminate(); } catch {} }
     for (const [symbol, item] of this.market) if (nowMono - item.receivedMono > 5 * 60 * 1000) this.market.delete(symbol);
@@ -302,4 +323,4 @@ class RealtimeHub extends EventEmitter {
   }
 }
 
-module.exports = { RealtimeHub, STREAM_HOSTS, STREAM_FRESH_MS };
+module.exports = { RealtimeHub, STREAM_HOSTS, STREAM_FRESH_MS, EVENT_FUTURE_TOLERANCE_MS, EVENT_MAX_LAG_MS, SYMBOL_SILENCE_RECONNECT_MS };

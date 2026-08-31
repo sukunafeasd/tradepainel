@@ -17,6 +17,35 @@ const { AppError, cleanSymbol, cleanInterval, cleanLimit, plainObject } = requir
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png", ".ico": "image/x-icon", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 
+function createSseWriter(res, { maxQueue = 256 } = {}) {
+  const coalescible = new Set(["snapshot", "market", "coins", "ping"]);
+  const queue = []; let blocked = false; let closed = false;
+  const encode = (type, data) => type === "ping" ? ": ping\n\n" : `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+  const flush = () => {
+    if (closed || res.destroyed) return;
+    blocked = false;
+    while (queue.length && !blocked) { const item = queue.shift(); blocked = !res.write(item.chunk); }
+  };
+  const send = (type, data = null) => {
+    if (closed || res.destroyed) return false;
+    const chunk = encode(type, data);
+    if (!blocked && queue.length === 0) { blocked = !res.write(chunk); return !blocked; }
+    if (coalescible.has(type)) {
+      const existing = queue.findLastIndex?.((item) => item.type === type) ?? -1;
+      if (existing >= 0) queue[existing] = { type, chunk }; else queue.push({ type, chunk });
+    } else queue.push({ type, chunk });
+    while (queue.length > maxQueue) {
+      const expendable = queue.findIndex((item) => coalescible.has(item.type));
+      if (expendable < 0) break;
+      queue.splice(expendable, 1);
+    }
+    return false;
+  };
+  const close = () => { closed = true; queue.length = 0; res.off?.("drain", flush); };
+  res.on("drain", flush);
+  return { send, close, diagnostics: () => ({ blocked, queued: queue.length, closed }) };
+}
+
 function createServer({ dataDirectory, uiDirectory, credentialStore, market = null, realtime = null, logger = console } = {}) {
   const token = crypto.randomBytes(32).toString("base64url");
   const clock = market?.clock || realtime?.clock || new ExchangeClock();
@@ -33,7 +62,9 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   const rate = new Map();
   let server;
   let settlementTimer = null;
+  let alertMonitorTimer = null;
   let settlementRunning = false;
+  let alertMonitorRunning = false;
   let listening = false;
 
   const log = (level, event, details = {}) => { try { (logger[level] || logger.log).call(logger, JSON.stringify({ level, event, at: clock.now(), ...details })); } catch {} };
@@ -117,12 +148,27 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     } finally { settlementRunning = false; }
   }
 
+  async function monitorAnalysisAlerts() {
+    if (!listening || alertMonitorRunning) return;
+    const targets = alerts.analysisTargets(); if (!targets.length) return;
+    alertMonitorRunning = true;
+    try {
+      for (const { symbol, interval } of targets) {
+        try {
+          const base = await getAnalysis(symbol, interval); const final = applyMtfGate(base, await getConfluence(symbol, interval));
+          latestFinalAnalysis.set(`${symbol}|${interval}`, { savedAtMono: performance.now(), value: structuredClone(final) });
+          alerts.checkAnalysis(final).forEach((alert) => live.publish?.("alert", alert));
+        } catch (error) { log("warn", "alert_monitor_failed", { symbol, interval, message: error.message }); }
+      }
+    } finally { alertMonitorRunning = false; }
+  }
+
   const onPrice = (datum) => {
-    alerts.checkPrice(datum).forEach((alert) => live.publish?.("alert", alert));
     paper.updatePrices({ [datum.symbol]: datum }, clock.now());
-    void settleDue();
   };
+  const onMarketPrice = (datum) => alerts.checkPrice(datum).forEach((alert) => live.publish?.("alert", alert));
   live.on?.("price", onPrice);
+  live.on?.("market-price", onMarketPrice);
   live.on?.("warning", (error) => log("warn", "realtime_warning", { message: error.message }));
 
   async function api(req, res, url) {
@@ -147,7 +193,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       let coins = live.marketSnapshot();
       try { const rest = await marketClient.topPairs("USDT", 220); coins = [...new Map([...rest, ...coins].map((item) => [item.symbol, item])).values()].sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, 220); }
       catch (error) { log("warn", "bootstrap_rest_degraded", { message: error.message }); }
-      return json(res, 200, { degraded: !coins.length, coins, selected: { symbol: live.symbol, interval: live.interval }, paper: paper.snapshot(priceDatums(), clock.now()), alerts: alerts.list(), journal: journal.list({ limit: 100 }), ai: credentialStore.status(), calibration: calibrator.status() });
+      return json(res, 200, { degraded: !coins.length, coins, selected: { symbol: live.symbol, interval: live.interval }, paper: paper.snapshot(priceDatums(), clock.now()), alerts: alerts.list(), journal: journal.page({ limit: 25 }), ai: credentialStore.status(), calibration: calibrator.status() });
     }
     if (pathname === "/api/coins") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
@@ -164,11 +210,10 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (pathname === "/api/live/stream") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
       res.writeHead(200, { ...securityHeaders("text/event-stream; charset=utf-8"), Connection: "keep-alive", "X-Accel-Buffering": "no" });
-      let blocked = false; const write = (chunk) => { if (blocked || res.destroyed) return false; blocked = !res.write(chunk); return !blocked; }; res.on("drain", () => { blocked = false; });
-      write(`event: ready\ndata: ${JSON.stringify({ symbol: live.symbol, interval: live.interval, localConnected: true })}\n\n`);
-      const remove = live.addClient((event) => write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`));
-      const keepAlive = setInterval(() => write(": ping\n\n"), 12000); const entry = { res, remove, keepAlive }; sseResponses.add(entry);
-      req.on("close", () => { clearInterval(keepAlive); remove(); sseResponses.delete(entry); }); return;
+      const writer = createSseWriter(res); writer.send("ready", { symbol: live.symbol, interval: live.interval, localConnected: true });
+      const remove = live.addClient((event) => writer.send(event.type, event.data));
+      const keepAlive = setInterval(() => writer.send("ping"), 12000); const entry = { res, remove, keepAlive, writer }; sseResponses.add(entry);
+      req.on("close", () => { clearInterval(keepAlive); remove(); writer.close(); sseResponses.delete(entry); }); return;
     }
 
     let match;
@@ -208,10 +253,10 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       return text(res, 200, `\uFEFF${header.join(",")}\n${lines.join("\n")}`, "text/csv; charset=utf-8", { "Content-Disposition": "attachment; filename=historico-dieftrade.csv" });
     }
     if (pathname === "/api/alerts" && req.method === "GET") return json(res, 200, alerts.list());
-    if (pathname === "/api/alerts" && req.method === "POST") { const input = await body(req); return json(res, 201, alerts.add({ ...input, currentDatum: priceDatums()[cleanSymbol(input.symbol)] })); }
+    if (pathname === "/api/alerts" && req.method === "POST") { const input = await body(req); const symbol = cleanSymbol(input.symbol); if (marketClient.assertTradable) await marketClient.assertTradable(symbol); return json(res, 201, alerts.add({ ...input, symbol, interval: input.interval || live.interval, currentDatum: priceDatums()[symbol] })); }
     if ((match = pathname.match(/^\/api\/alerts\/([a-f0-9]+)$/)) && req.method === "DELETE") { const removed = alerts.remove(match[1]); return removed ? json(res, 200, { ok: true, removed: true }) : fail(res, 404, "Alerta não encontrado.", "NOT_FOUND"); }
-    if (pathname === "/api/journal" && req.method === "GET") return json(res, 200, journal.list({ offset: Math.max(0, Number(url.searchParams.get("offset")) || 0), limit: cleanLimit(url.searchParams.get("limit"), 100, 500), query: url.searchParams.get("q") || "" }));
-    if (pathname === "/api/journal" && req.method === "POST") return json(res, 201, journal.add(await body(req)));
+    if (pathname === "/api/journal" && req.method === "GET") return json(res, 200, journal.page({ offset: Math.max(0, Number(url.searchParams.get("offset")) || 0), limit: cleanLimit(url.searchParams.get("limit"), 25, 100), query: url.searchParams.get("q") || "" }));
+    if (pathname === "/api/journal" && req.method === "POST") { const input = await body(req); const symbol = cleanSymbol(input.symbol); if (marketClient.assertTradable) await marketClient.assertTradable(symbol); return json(res, 201, journal.add({ ...input, symbol })); }
     if ((match = pathname.match(/^\/api\/journal\/([a-f0-9]+)$/)) && req.method === "DELETE") { const removed = journal.remove(match[1]); return removed ? json(res, 200, { ok: true, removed: true }) : fail(res, 404, "Anotação não encontrada.", "NOT_FOUND"); }
     if (pathname === "/api/ai/config" && req.method === "GET") return json(res, 200, credentialStore.status());
     if (pathname === "/api/ai/config" && req.method === "POST") {
@@ -221,7 +266,10 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (pathname === "/api/ai/config" && req.method === "DELETE") return json(res, 200, credentialStore.remove());
     if (pathname === "/api/ai/test" && req.method === "POST") { await body(req); return json(res, 200, await ai.diagnose()); }
     if (pathname === "/api/ai/read" && req.method === "POST") {
-      ai.assertReady(); const input = await body(req); const symbol = cleanSymbol(input.symbol || live.symbol); const interval = cleanInterval(input.interval || live.interval); const base = await getAnalysis(symbol, interval, { force: true }); const analysis = applyMtfGate(base, await getConfluence(symbol, interval, true)); return json(res, 200, await ai.read(analysis));
+      const input = await body(req); const symbol = cleanSymbol(input.symbol || live.symbol); const interval = cleanInterval(input.interval || live.interval); const key = `${symbol}|${interval}`; const recent = latestFinalAnalysis.get(key);
+      let analysis = recent && performance.now() - recent.savedAtMono <= 30000 ? structuredClone(recent.value) : null;
+      if (!analysis) { const base = await getAnalysis(symbol, interval); analysis = applyMtfGate(base, await getConfluence(symbol, interval)); latestFinalAnalysis.set(key, { savedAtMono: performance.now(), value: structuredClone(analysis) }); }
+      return json(res, 200, await ai.read(analysis));
     }
     if (pathname === "/api/calibration" && req.method === "GET") return json(res, 200, calibrator.status());
     if (pathname === "/api/calibration/reset" && req.method === "POST") { const input = await body(req); if (input.confirm !== true) throw new AppError("Confirme a limpeza da calibração.", { status: 409, code: "CONFIRM_REQUIRED" }); analysisCache.clear(); return json(res, 200, calibrator.reset()); }
@@ -258,14 +306,14 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
         server.listen(port, "127.0.0.1", async () => {
           server.removeListener("error", reject); listening = true;
           try { await marketClient.syncClock?.(); } catch (error) { log("warn", "clock_sync_failed", { message: error.message }); }
-          live.start(); settlementTimer = setInterval(() => { paper.updatePrices(priceDatums(), clock.now()); void settleDue(); }, 1000); settlementTimer.unref?.(); void settleDue(); resolve({ port: server.address().port, token });
+          live.start(); settlementTimer = setInterval(() => { paper.updatePrices(priceDatums(), clock.now()); void settleDue(); }, 1000); settlementTimer.unref?.(); alertMonitorTimer = setInterval(() => void monitorAnalysisAlerts(), 15000); alertMonitorTimer.unref?.(); void settleDue(); void monitorAnalysisAlerts(); resolve({ port: server.address().port, token });
         });
       });
     },
     async close() {
-      listening = false; if (settlementTimer) clearInterval(settlementTimer); settlementTimer = null;
-      live.off?.("price", onPrice); live.close(); marketClient.close?.();
-      for (const entry of sseResponses) { clearInterval(entry.keepAlive); entry.remove(); try { entry.res.end(); } catch {} } sseResponses.clear();
+      listening = false; if (settlementTimer) clearInterval(settlementTimer); if (alertMonitorTimer) clearInterval(alertMonitorTimer); settlementTimer = null; alertMonitorTimer = null;
+      live.off?.("price", onPrice); live.off?.("market-price", onMarketPrice); live.close(); marketClient.close?.();
+      for (const entry of sseResponses) { clearInterval(entry.keepAlive); entry.remove(); entry.writer?.close(); try { entry.res.end(); } catch {} } sseResponses.clear();
       if (!server.listening) return;
       await new Promise((resolve) => {
         const force = setTimeout(() => { server.closeAllConnections?.(); resolve(); }, 1500);
@@ -277,4 +325,4 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   };
 }
 
-module.exports = { createServer };
+module.exports = { createServer, createSseWriter };

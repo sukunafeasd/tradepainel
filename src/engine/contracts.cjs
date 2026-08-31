@@ -60,16 +60,19 @@ function validTimestamp(value, name = "Timestamp") {
   return timestamp;
 }
 
-function validateMarketDatum(datum, { maxAgeMs = Infinity, now = Date.now(), symbol = null } = {}) {
+function validateMarketDatum(datum, { maxAgeMs = Infinity, maxExchangeAgeMs = maxAgeMs, futureToleranceMs = 2000, now = Date.now(), symbol = null } = {}) {
   if (!datum || typeof datum !== "object") return null;
   const value = Number(datum.value ?? datum.price);
   const exchangeTimestamp = Number(datum.exchangeTimestamp);
   const receivedAt = Number(datum.receivedAt);
   if (!(Number.isFinite(value) && value > 0 && Number.isFinite(exchangeTimestamp) && Number.isFinite(receivedAt))) return null;
   if (symbol && datum.symbol && cleanSymbol(datum.symbol) !== cleanSymbol(symbol)) return null;
+  const futureByMs = exchangeTimestamp - now;
+  const receivedFutureByMs = receivedAt - now;
+  if (futureByMs > futureToleranceMs || receivedFutureByMs > futureToleranceMs) return null;
   const ageMs = Math.max(0, now - receivedAt);
   const exchangeAgeMs = Math.max(0, now - exchangeTimestamp);
-  const stale = Boolean(datum.stale) || ageMs > maxAgeMs || exchangeAgeMs > maxAgeMs;
+  const stale = Boolean(datum.stale) || ageMs > maxAgeMs || exchangeAgeMs > maxExchangeAgeMs;
   return { ...datum, value, exchangeTimestamp, receivedAt, ageMs, exchangeAgeMs, stale };
 }
 

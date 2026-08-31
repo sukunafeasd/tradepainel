@@ -56,3 +56,22 @@ test("diagnóstico Gemini confirma modelo sem revelar a chave", async () => {
     assert.doesNotMatch(JSON.stringify(result), /AQ\./);
   } finally { global.fetch = original; }
 });
+
+test("falha do provedor não consome a única leitura diária", async () => {
+  const original = global.fetch; let succeed = false;
+  const content = { veredito: "AGUARDE", resumo: "Teste", contexto: "Contexto", confirmacoes: [], conflitos: [], riscos: ["Risco"], gatilho: "Aguardar", invalidacao: "Sem entrada", gerenciamento: "Não operar" };
+  global.fetch = async () => succeed ? { ok: true, status: 200, headers: new Headers(), json: async () => ({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify(content) }] } }] }) } : { ok: false, status: 500, text: async () => "temporário" };
+  try {
+    const reader = new AiReader({ load: () => ({ apiKey: "AQ." + "x".repeat(32), provider: "gemini", model: "gemini-2.5-flash" }) }, { cooldownMs: 0, dailyLimit: 1, requestTimeoutMs: 1000 });
+    await assert.rejects(() => reader.read({ symbol: "BTCUSDT", interval: "1m" }), /temporariamente/i);
+    succeed = true; const result = await reader.read({ symbol: "BTCUSDT", interval: "1m" });
+    assert.equal(result.content.veredito, "AGUARDE"); assert.equal(reader.dailyCalls, 1);
+  } finally { global.fetch = original; }
+});
+
+test("parser aceita invólucro textual mas rejeita resposta truncada", async () => {
+  const { parseJson } = require("../src/engine/ai-reader.cjs");
+  const value = { veredito: "AGUARDE", resumo: "Teste", contexto: "Contexto", confirmacoes: [], conflitos: [], riscos: ["Risco"], gatilho: "Aguardar", invalidacao: "Sem entrada", gerenciamento: "Não operar" };
+  assert.deepEqual(parseJson(`Resposta:\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``), value);
+  assert.throws(() => parseJson('{"veredito":"AGUARDE"'), /incompleta/i);
+});

@@ -141,8 +141,13 @@ function buildRiskPlan({ signal, price, atrValue, levels, account = 10000, riskP
   const target2Raw = price + side * riskPerUnit * 2;
   const obstacle = side > 0 ? (levels.resistances || []).filter((level) => level.price > price).sort((a, b) => a.price - b.price)[0] : (levels.supports || []).filter((level) => level.price < price).sort((a, b) => b.price - a.price)[0];
   const obstacleBeforeTarget = obstacle && (side > 0 ? obstacle.price < target2Raw : obstacle.price > target2Raw);
-  const target2 = obstacleBeforeTarget ? obstacle.price - side * Math.max(atrValue * 0.08, price * 0.0002) : target2Raw;
-  const target1 = side > 0 ? Math.min(target1Raw, target2) : Math.max(target1Raw, target2);
+  const padding = Math.max(atrValue * 0.08, price * 0.0002);
+  const adjustedTarget = obstacleBeforeTarget ? obstacle.price - side * padding : target2Raw;
+  const minimumReward = Math.max(riskPerUnit * 0.25, price * 0.000001);
+  const adjustedOnCorrectSide = side > 0 ? adjustedTarget > price + minimumReward : adjustedTarget < price - minimumReward;
+  const target2 = adjustedOnCorrectSide ? adjustedTarget : target2Raw;
+  const target1Candidate = side > 0 ? Math.min(target1Raw, target2) : Math.max(target1Raw, target2);
+  const target1 = side > 0 ? Math.max(price + minimumReward, target1Candidate) : Math.min(price - minimumReward, target1Candidate);
   const cleanAccount = Math.max(0, Number(account) || 0);
   const riskBudget = cleanAccount * clamp(Number(riskPct) || 0.5, 0.1, 3) / 100;
   const riskQuantity = riskBudget / riskPerUnit;
@@ -260,9 +265,11 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   const evidenceGroups = new Set(aligned.map((reason) => reason.group)).size;
   const conflictingGroups = new Set(conflicting.map((reason) => reason.group)).size;
   const strengthQuality = alignedStrength + conflictStrength ? alignedStrength / (alignedStrength + conflictStrength) : 0;
-  const volumeQuality = Number.isFinite(volumeRatio) ? clamp(volumeRatio / 2, 0, 1) : 0;
+  const volumeDirection = Math.sign(Number(at(calc).close) - Number(at(calc).open));
+  const volumeQuality = Number.isFinite(volumeRatio) && directionSign !== 0 && volumeDirection === directionSign ? clamp(volumeRatio / 2, 0, 1) : 0;
   let rawConfidence = 10 + evidenceGroups * 7 + strengthQuality * 35 + trendQuality * 12 + volumeQuality * 5 - conflictingGroups * 5;
-  if (Number.isFinite(micro.spreadPct) && micro.spreadPct > 0.08) rawConfidence -= Math.min(20, micro.spreadPct * 80);
+  const usableSpreadPct = useMicro && Number.isFinite(Number(micro.spreadPct)) ? Number(micro.spreadPct) : null;
+  if (Number.isFinite(usableSpreadPct) && usableSpreadPct > 0.08) rawConfidence -= Math.min(20, usableSpreadPct * 80);
   const confidence = Math.round(clamp(rawConfidence * (Number(calibration?.confidenceFactor) || 1), 0, 92));
   const minimum = 30 + clamp(Number(calibration?.thresholdAdjustment) || 0, -2, 5);
   const signal = rawScore >= minimum ? "COMPRA" : rawScore <= -minimum ? "VENDA" : "AGUARDE";
@@ -273,7 +280,7 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   if (!Number.isFinite(volumeRatio)) warnings.push("Volume indisponível: VWAP e confirmação de volume não influenciaram a leitura.");
   else if (volumeRatio < 0.55) warnings.push("Volume fraco: rompimentos têm menor qualidade.");
   if (micro.stale !== false && SHORT_MICRO_INTERVALS.has(cleanIntervalValue)) warnings.push("Microestrutura indisponível ou atrasada; book e agressão foram excluídos do score.");
-  if (Number.isFinite(micro.spreadPct) && micro.spreadPct > 0.08) warnings.push("Spread elevado reduziu a qualidade, sem criar viés de compra ou venda.");
+  if (Number.isFinite(usableSpreadPct) && usableSpreadPct > 0.08) warnings.push("Spread elevado reduziu a qualidade, sem criar viés de compra ou venda.");
   if (signal !== "AGUARDE" && structure.bias !== 0 && Math.sign(structure.bias) !== Math.sign(rawScore)) warnings.push("Sinal contra a estrutura principal: o plano foi bloqueado.");
   if (conflictingGroups >= 3) warnings.push("Existem grupos técnicos conflitantes; a leitura exige confirmação adicional.");
   if (validation.gaps) warnings.push(`A série possui ${validation.gaps} gap(s) temporal(is); interprete com cautela.`);
@@ -282,11 +289,11 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   const ageMs = Math.max(0, now - latestDataAt);
   const expectedAge = INTERVAL_MS[cleanIntervalValue] * 1.5;
   const freshnessScore = ageMs > expectedAge * 3 ? 0 : ageMs > expectedAge ? 45 : 100;
-  const liquidityScore = Number.isFinite(micro.spreadPct) ? Math.round(clamp(100 - micro.spreadPct * 900, 0, 100)) : 65;
+  const liquidityScore = Number.isFinite(usableSpreadPct) ? Math.round(clamp(100 - usableSpreadPct * 900, 0, 100)) : 65;
   const completenessScore = validation.gaps ? Math.max(30, 100 - validation.gaps * 10) : 100;
   const dataQualityScore = Math.round(freshnessScore * 0.45 + liquidityScore * 0.35 + completenessScore * 0.2);
   const contraStructure = signal !== "AGUARDE" && structure.bias !== 0 && Math.sign(structure.bias) !== Math.sign(rawScore);
-  const plan = contraStructure ? null : buildRiskPlan({ signal, price, atrValue, levels, account, riskPct, spreadPct: micro.spreadPct });
+  const plan = contraStructure ? null : buildRiskPlan({ signal, price, atrValue, levels, account, riskPct, spreadPct: usableSpreadPct || 0 });
 
   return {
     id: `${cleanSymbolValue}|${cleanIntervalValue}|${latest.t}|${now}`,
@@ -298,7 +305,7 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
     calibration: calibration ? { samples: calibration.samples || 0, reliability: Number(calibration.reliability || 0.5), state: (calibration.samples || 0) < 12 ? "aquecendo" : (calibration.samples || 0) < 60 ? "calibrando" : "maduro", adjusted: (calibration.samples || 0) >= 12 } : { samples: 0, reliability: 0.5, state: "aquecendo", adjusted: false },
     indicators: { ema9: priceRound(at(ema9)), ema20: priceRound(at(ema20)), ema50: priceRound(at(ema50)), ema200: priceRound(at(ema200)), rsi: I.round(rsiValue, 2), macd: priceRound(at(macd.line)), macdSignal: priceRound(at(macd.signal)), macdHistogram: priceRound(hist), bollingerUpper: priceRound(at(bb.upper)), bollingerMiddle: priceRound(at(bb.middle)), bollingerLower: priceRound(at(bb.lower)), bollingerPercentB: I.round(at(bb.percentB), 3), bandwidth: I.round(at(bb.bandwidth), 4), atr: priceRound(atrValue), atrPct: I.round(volatilityPct, 3), vwap: vwapAllowed ? priceRound(vwapValue) : null, adx: I.round(adxValue, 2), stochasticK: I.round(at(stochastic.k), 2), stochasticD: I.round(at(stochastic.d), 2), obvSlope: I.round(obvSlope, 2), roc: I.round(at(roc), 3), volumeRatio: I.round(volumeRatio, 2) },
     levels: { supports: levels.supports.map((level) => ({ price: priceRound(level.price), touches: level.touches, supportTouches: level.supportTouches, resistanceTouches: level.resistanceTouches, strength: level.strength, role: level.role, distancePct: I.round(level.distancePct, 3) })), resistances: levels.resistances.map((level) => ({ price: priceRound(level.price), touches: level.touches, supportTouches: level.supportTouches, resistanceTouches: level.resistanceTouches, strength: level.strength, role: level.role, distancePct: I.round(level.distancePct, 3) })), atPrice: levels.atPrice, volumeProfile: profile },
-    micro: { used: useMicro, stale: micro.stale !== false, spreadPct: I.round(micro.spreadPct, 4), bookImbalance: useMicro ? I.round(micro.bookImbalance, 4) : null, buyRatio: useMicro ? I.round(micro.buyRatio, 4) : null, delta: useMicro ? I.round(micro.delta, 4) : null, deltaQuote: useMicro ? I.round(micro.deltaQuote, 2) : null },
+    micro: { used: useMicro, stale: micro.stale !== false, spreadPct: Number.isFinite(usableSpreadPct) ? I.round(usableSpreadPct, 4) : null, bookImbalance: useMicro ? I.round(micro.bookImbalance, 4) : null, buyRatio: useMicro ? I.round(micro.buyRatio, 4) : null, delta: useMicro ? I.round(micro.delta, 4) : null, deltaQuote: useMicro ? I.round(micro.deltaQuote, 2) : null },
     plan,
     series: { candles: calc.slice(-500), ema9: ema9.slice(-500).map(priceRound), ema20: ema20.slice(-500).map(priceRound), ema50: ema50.slice(-500).map(priceRound), vwap: vwap.slice(-500).map(priceRound) },
   };

@@ -60,3 +60,19 @@ test("múltiplas operações e símbolos vencem juntas sem perder resultado", ()
     assert.equal(sim.snapshot({}, now).total, 2);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("liquidação ausente usa backoff, termina como devolvida e idempotência longa é estável", () => {
+  const dir = temp(); let now = 1_800_000_400_000;
+  try {
+    const sim = new ExpirySimulator(dir, { now: () => now, settlementPolicy: { maxAttempts: 3, maxPendingMs: 60000, baseRetryMs: 1000, maxRetryMs: 4000 } });
+    const key = "pedido-" + "x".repeat(300);
+    const trade = sim.place({ symbol: "BTCUSDT", direction: "up", stake: 100, entryDatum: datum("BTCUSDT", 100, now), durationMs: 30000, idempotencyKey: key });
+    assert.equal(sim.place({ symbol: "BTCUSDT", direction: "up", stake: 100, entryDatum: datum("BTCUSDT", 100, now), durationMs: 30000, idempotencyKey: key }).id, trade.id);
+    now = trade.expiresAt + 10;
+    assert.equal(sim.settleResolved({ [trade.id]: datum("BTCUSDT", 999, trade.expiresAt + 1) }, now).length, 0);
+    assert.equal(sim.due(now).length, 0);
+    now += 1000; assert.equal(sim.settleResolved({}, now).length, 0); assert.equal(sim.due(now).length, 0);
+    now += 2000; const [closed] = sim.settleResolved({}, now);
+    assert.equal(closed.result, "unresolved"); assert.equal(sim.snapshot({}, now).balance, 10000); assert.equal(sim.snapshot({}, now).unresolved, 1);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
