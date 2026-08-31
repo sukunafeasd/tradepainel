@@ -1,0 +1,18 @@
+.chart-head{align-items:flex-start}
+.chart-tools{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.chart-actions{display:flex;gap:5px}
+.chart-actions button{border:1px solid var(--line);background:var(--panel2);color:var(--muted);border-radius:7px;min-width:31px;height:28px;padding:0 8px;cursor:pointer;font-weight:800}
+.chart-actions button:hover,.chart-actions button.active{color:var(--green);border-color:var(--green);background:color-mix(in srgb,var(--green) 10%,var(--panel2))}
+.chart-wrap canvas{cursor:crosshair;touch-action:none}
+.chart-wrap canvas:active{cursor:grabbing}
+.chart-tooltip{position:absolute;z-index:4;display:none;pointer-events:none;min-width:205px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--panel) 94%,transparent);box-shadow:0 8px 25px #0008;font-size:10px;color:var(--muted);backdrop-filter:blur(10px)}
+.chart-tooltip b,.chart-tooltip span{display:block}
+.chart-tooltip b{color:var(--text);margin-bottom:4px}
+.chart-tooltip span+span{margin-top:2px}
+.payout-note{padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);font-size:10px;color:var(--muted)}
+.payout-note b{color:var(--gold)}
+.trade-open{border-left:3px solid var(--gold)}
+.countdown{font-variant-numeric:tabular-nums;color:var(--gold);align-self:center;font-size:14px}
+.table-list.compact .list-row>small{text-align:right}
+.ai-copy a{color:var(--green)}
+@media(max-width:1250px){.chart-head{gap:12px}.chart-tools{max-width:62%}.legend{flex-wrap:wrap;justify-content:flex-end}}

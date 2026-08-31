@@ -7,7 +7,8 @@ const crypto = require("crypto");
 const { MarketClient, INTERVALS } = require("./engine/market-client.cjs");
 const { RealtimeHub } = require("./engine/realtime-hub.cjs");
 const { analyze, combineTimeframes } = require("./engine/analysis.cjs");
-const { PaperPortfolio, AlertsStore, JournalStore } = require("./engine/paper.cjs");
+const { AlertsStore, JournalStore } = require("./engine/paper.cjs");
+const { ExpirySimulator } = require("./engine/expiry-simulator.cjs");
 const { AiReader } = require("./engine/ai-reader.cjs");
 
 const MIME = {
@@ -26,7 +27,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   const token = crypto.randomBytes(32).toString("base64url");
   const marketClient = market || new MarketClient();
   const live = realtime || new RealtimeHub();
-  const paper = new PaperPortfolio(dataDirectory);
+  const paper = new ExpirySimulator(dataDirectory);
   const alerts = new AlertsStore(dataDirectory);
   const journal = new JournalStore(dataDirectory);
   const ai = new AiReader(credentialStore);
@@ -117,7 +118,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (!authorize(req, url)) return fail(res, 401, "Sessão local inválida.");
     const pathname = url.pathname;
     if (pathname === "/api/health") return json(res, 200, {
-      ok: true, version: "0.3.0", live: live.snapshot(), market: marketClient.status(), ai: credentialStore.status(),
+      ok: true, version: "0.4.0", live: live.snapshot(), market: marketClient.status(), ai: credentialStore.status(),
       safety: { realOrders: false, publicMarketDataOnly: true },
     });
     if (pathname === "/api/bootstrap") {
@@ -166,11 +167,10 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       const input = await body(req);
       const symbol = cleanSymbol(input.symbol);
       const currentPrice = prices()[symbol] || (await marketClient.ticker(symbol)).last;
-      return json(res, 200, { trade: paper.order({ ...input, symbol, price: currentPrice }), portfolio: paper.snapshot(prices()) });
+      return json(res, 200, { trade: paper.place({ ...input, symbol, entryPrice: currentPrice }), portfolio: paper.snapshot(prices()) });
     }
     if (pathname === "/api/paper/reset" && req.method === "POST") {
-      const input = await body(req);
-      return json(res, 200, paper.reset(input.balance));
+      return json(res, 200, paper.reset(10000));
     }
     if (pathname === "/api/alerts" && req.method === "GET") return json(res, 200, alerts.list());
     if (pathname === "/api/alerts" && req.method === "POST") return json(res, 200, alerts.add(await body(req)));
@@ -215,8 +215,8 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     }
   });
 
-  const alertTimer = setInterval(() => alerts.check(prices()), 1000);
-  alertTimer.unref();
+  const stateTimer = setInterval(() => { const current = prices(); alerts.check(current); paper.settle(current); }, 250);
+  stateTimer.unref();
 
   return {
     token,
@@ -229,7 +229,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       });
     },
     async close() {
-      clearInterval(alertTimer);
+      clearInterval(stateTimer);
       live.close();
       if (!server.listening) return;
       await new Promise((resolve) => server.close(resolve));

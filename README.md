@@ -5,26 +5,26 @@ Assistente desktop de leitura de mercado e **paper trading** para day trade de c
 ## O que já existe
 
 - scanner ao vivo dos pares USDT mais líquidos;
-- velas e médias EMA 9/20/50, VWAP e volume;
+- gráfico de velas ao vivo com preços à direita, horários, crosshair, histórico, zoom e acompanhamento da vela atual;
+- médias EMA 9/20/50, VWAP e volume;
 - RSI, MACD, Bollinger, ATR, ADX, Estocástico, OBV, ROC e volume relativo;
 - suportes, resistências, pivôs, padrões de vela e estrutura de mercado;
 - fluxo de agressão, delta, spread e desequilíbrio do book;
 - confluência de 1m, 5m, 15m, 1h e 4h;
 - plano técnico com stop, alvos e tamanho de posição de referência;
-- simulador local com saldo, posições, taxas e histórico;
+- simulador por expiração com US$ 10 mil virtuais, Alta/Baixa, tempos de 30 segundos a 15 minutos, resultado automático, histórico, taxa de acerto e restauração de saldo;
 - alertas de preço e diário do trader;
-- leitura complementar opcional pela OpenAI.
+- leitura complementar opcional pelo Google Gemini ou OpenAI;
 - cinco temas, escala de interface e redução de animações;
 - Pixel, o pato trader original, reagindo ao sinal do mercado;
 - scanner e vela atual atualizados continuamente por WebSocket;
-- espelho de operação para treino externo, sempre com confirmação manual.
 
 ## Princípios
 
 - sinais são leitura técnica, não promessa de lucro;
 - “confiança” mede a qualidade da confluência, não uma probabilidade garantida;
 - o programa não possui chave de corretora e não envia ordens reais;
-- a chave opcional da OpenAI é criptografada pelo Windows e nunca volta à interface;
+- a chave opcional do Gemini/OpenAI é criptografada pelo Windows e nunca volta à interface;
 - a chave nunca deve ser colocada no código, GitHub ou conversa;
 - servidor local limitado a `127.0.0.1`, protegido por token aleatório, mesma origem e CSP;
 - dados de mercado públicos da Binance, com WebSocket ao vivo e fallback REST.

@@ -9,8 +9,8 @@ const { CredentialStore } = require("./security/credential-store.cjs");
 const allowedExternal = new Set([
   "https://platform.openai.com/api-keys",
   "https://platform.openai.com/settings/organization/billing/overview",
+  "https://aistudio.google.com/app/apikey",
   "https://developers.binance.com/docs/binance-spot-api-docs",
-  "https://trade.casatrade.com/",
 ]);
 
 let localServer = null;
@@ -73,9 +73,10 @@ async function start() {
     await new Promise((resolve) => setTimeout(resolve, 9000));
     const smoke = await mainWindow.webContents.executeJavaScript(`(async()=>{
       const theme=document.querySelector('[data-theme="midnight"]'); theme?.click();
-      const input=document.getElementById('paperQty'); input.value='100'; input.dispatchEvent(new Event('input',{bubbles:true}));
-      document.getElementById('paperForm').requestSubmit(); await new Promise(r=>setTimeout(r,1200));
-      return {theme:document.body.dataset.theme,paperMessage:document.getElementById('paperMessage').textContent,coinCount:Number(document.getElementById('coinCount').textContent),price:document.getElementById('price').textContent,duck:Boolean(document.getElementById('pixel'))};
+       const input=document.getElementById('paperQty'); input.value='100'; input.dispatchEvent(new Event('input',{bubbles:true}));
+       document.getElementById('paperForm').requestSubmit(); await new Promise(r=>setTimeout(r,1200));
+       document.querySelector('[data-tab="paper"]')?.click(); await new Promise(r=>setTimeout(r,150));
+       return {theme:document.body.dataset.theme,paperMessage:document.getElementById('paperMessage').textContent,openTrades:document.querySelectorAll('#positions .trade-open').length,coinCount:Number(document.getElementById('coinCount').textContent),price:document.getElementById('price').textContent,duck:Boolean(document.getElementById('pixel'))};
     })()`);
     if (process.env.DIEFTRADE_SMOKE_REPORT) fs.writeFileSync(process.env.DIEFTRADE_SMOKE_REPORT, JSON.stringify(smoke, null, 2));
     const image = await mainWindow.webContents.capturePage();
