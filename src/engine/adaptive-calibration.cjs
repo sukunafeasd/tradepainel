@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const { JsonStore } = require("./storage.cjs");
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const INTERVAL_MS = { "1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000, "2h": 7200000, "4h": 14400000, "6h": 21600000, "8h": 28800000, "12h": 43200000, "1d": 86400000 };
 const MIN_HORIZON_FACTOR = 0.8;
 const MAX_HORIZON_FACTOR = 1.25;
@@ -57,6 +57,8 @@ function validShadowPending(value) {
     && isFiniteTimestamp(value.dueAt) && value.dueAt > value.observedAt
     && Number(value.expectedHorizonMs) === INTERVAL_MS[value.interval]
     && isCount(value.settlementAttempts)
+    && (value.signalId == null || (typeof value.signalId === "string" && value.signalId.length >= 8 && value.signalId.length <= 80))
+    && (value.analysisId == null || (typeof value.analysisId === "string" && value.analysisId.length > 0 && value.analysisId.length <= 240))
     && (value.nextSettlementAttemptAt == null || isFiniteTimestamp(value.nextSettlementAttemptAt))
     && Array.isArray(value.reasons) && value.reasons.every(validReason)
   );
@@ -97,6 +99,8 @@ function migrate(value) {
   if (value.schemaVersion === SCHEMA_VERSION || Number(value.schemaVersion) > SCHEMA_VERSION) return value;
   const hits = safeCount(value.hits);
   const misses = safeCount(value.misses);
+  const pending = Array.isArray(value.shadowPending) ? value.shadowPending.filter(validShadowPending) : [];
+  const seen = Array.isArray(value.shadowSeen) ? value.shadowSeen.filter(validSeen).slice(-MAX_SEEN) : [];
   return {
     ...initial(isFiniteTimestamp(Number(value.updatedAt)) ? Number(value.updatedAt) : Date.now()),
     samples: hits + misses,
@@ -107,6 +111,10 @@ function migrate(value) {
     buckets: sanitizeBucketMap(value.buckets, 160),
     groups: sanitizeBucketMap(value.groups, 220),
     recent: Array.isArray(value.recent) ? value.recent.filter(validRecentRecord).slice(-MAX_RECENT) : [],
+    shadowPending: pending,
+    shadowSeen: [...new Map(seen.map((item) => [item.key, item])).values()],
+    shadowSettled: safeCount(value.shadowSettled),
+    shadowSkipped: safeCount(value.shadowSkipped),
   };
 }
 
@@ -212,7 +220,7 @@ class AdaptiveCalibrator {
       confidenceFactor: applied ? Number(clamp(1 + (reliability - 0.5) * 0.3 * maturity, 0.94, 1.05).toFixed(4)) : 1,
       thresholdAdjustment: applied ? Math.round(clamp((0.5 - reliability) * 12 * maturity, -1, 3)) : 0,
       groupWeights: groups,
-      methodology: "Sinais são avaliados automaticamente no horizonte exato; operações manuais só contam entre 0,8x e 1,25x do timeframe; pesos são isolados por par e timeframe.",
+      methodology: "Somente sinais confirmados são avaliados automaticamente no horizonte exato; operações manuais vinculadas não duplicam a amostra; pesos são isolados por par e timeframe.",
       updatedAt: data.updatedAt,
     };
   }
@@ -226,7 +234,8 @@ class AdaptiveCalibrator {
       if (trade.result === "unresolved") continue;
       // Once a signal is part of the unbiased shadow dataset, a user-selected
       // operation from the same candle must not give that signal a second vote.
-      const observedKey = signalObservationKey(reading);
+      const linkedSignalId = trade.signalId || reading.signalId || reading.signalLifecycle?.signalId;
+      const observedKey = linkedSignalId ? `confirmed:${linkedSignalId}` : signalObservationKey(reading);
       if (observedKey && data.shadowSeen.some((item) => item.key === observedKey)) continue;
       const expectedHorizonMs = Number(reading.expectedHorizonMs || INTERVAL_MS[reading.interval]);
       const tradeDurationMs = Number(trade.durationMs);
@@ -246,15 +255,15 @@ class AdaptiveCalibrator {
     return this.status();
   }
 
-  observeSignal(analysis, now = this.now()) {
-    if (!analysis || !validSignal(analysis.signal)) return { recorded: false, reason: "sinal_inativo" };
-    const symbol = String(analysis.symbol || "").toUpperCase();
-    const interval = String(analysis.interval || "");
-    const entryPrice = Number(analysis.price);
+  observeConfirmedSignal(signal, analysis = null, now = this.now()) {
+    if (!signal || !validSignal(signal.direction) || !signal.signalId || !isFiniteTimestamp(signal.confirmedAt) || !(Number(signal.confirmedPrice) > 0)) return { recorded: false, reason: "sinal_nao_confirmado" };
+    const reading = analysis || {};
+    const symbol = String(signal.symbol || reading.symbol || "").toUpperCase();
+    const interval = String(signal.interval || reading.interval || "");
+    const entryPrice = Number(signal.confirmedPrice);
     const expectedHorizonMs = INTERVAL_MS[interval];
     if (!symbol || symbol.length > 24 || !expectedHorizonMs || !(entryPrice > 0) || !isFiniteTimestamp(now)) return { recorded: false, reason: "sinal_invalido" };
-    const candleIdentity = Number(analysis.latestCandleCloseTime || analysis.latestCandleOpenTime || analysis.calculatedAt || analysis.ts || now);
-    const key = signalObservationKey({ ...analysis, symbol, interval, at: candleIdentity });
+    const key = `confirmed:${String(signal.signalId)}`.slice(0, 240);
     if (!key) return { recorded: false, reason: "sinal_invalido" };
     const alreadySeen = this.store.value.shadowSeen.some((item) => item.key === key);
     if (alreadySeen) return { recorded: false, reason: "duplicado" };
@@ -264,14 +273,16 @@ class AdaptiveCalibrator {
       key,
       symbol,
       interval,
-      predicted: analysis.signal,
+      predicted: signal.direction,
       entryPrice,
-      observedAt: now,
-      dueAt: now + expectedHorizonMs,
+      observedAt: Number(signal.confirmedAt),
+      dueAt: Number(signal.confirmedAt) + expectedHorizonMs,
       expectedHorizonMs,
-      confidence: Number.isFinite(Number(analysis.confidence)) ? Number(analysis.confidence) : null,
-      score: Number.isFinite(Number(analysis.score)) ? Number(analysis.score) : null,
-      reasons: normalizedReasons(analysis.reasons),
+      confidence: Number.isFinite(Number(signal.confidenceAtConfirm ?? reading.confidence)) ? Number(signal.confidenceAtConfirm ?? reading.confidence) : null,
+      score: Number.isFinite(Number(signal.scoreAtConfirm ?? reading.score)) ? Number(signal.scoreAtConfirm ?? reading.score) : null,
+      reasons: normalizedReasons(reading.reasons),
+      signalId: String(signal.signalId),
+      analysisId: String(signal.analysisId || reading.id || "").slice(0, 240) || null,
       settlementAttempts: 0,
       nextSettlementAttemptAt: null,
     };
@@ -280,6 +291,11 @@ class AdaptiveCalibrator {
     this.store.value.updatedAt = now;
     this.store.saveQueued();
     return { recorded: true, observation: structuredClone(observation) };
+  }
+
+  observeSignal(analysis, now = this.now()) {
+    if (analysis?.signalLifecycle?.signalId) return this.observeConfirmedSignal(analysis.signalLifecycle, analysis, now);
+    return { recorded: false, reason: "aguardando_sinal_confirmado" };
   }
 
   shadowDue(now = this.now(), limit = 100) {
@@ -346,7 +362,7 @@ class AdaptiveCalibrator {
       skippedHorizon: data.skippedHorizon,
       accuracy: accuracy == null ? null : Number(accuracy.toFixed(2)),
       learning: data.samples < 12 ? "aquecendo" : data.samples < 60 ? "calibrando" : "maduro",
-      shadow: { pending: data.shadowPending.length, settled: data.shadowSettled, skipped: data.shadowSkipped },
+      shadow: { pending: data.shadowPending.length, pendingObservations: data.shadowPending.length, completedObservations: data.shadowSettled, droppedObservations: data.shadowSkipped, settled: data.shadowSettled, skipped: data.shadowSkipped },
       recent: data.recent.slice(-30).reverse(),
       updatedAt: data.updatedAt,
       persistence: this.store.diagnostics(),

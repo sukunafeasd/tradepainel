@@ -15,6 +15,7 @@ Assistente desktop de leitura de mercado e **paper trading** para day trade de c
 - simulador por expiração com US$ 10 mil virtuais, Alta/Baixa, tempos de 30 segundos a 15 minutos, resultado automático, histórico, taxa de acerto e restauração de saldo;
 - alertas de preço e diário do trader;
 - leitura complementar opcional pelo Google Gemini ou OpenAI;
+- ciclo de vida persistente com candidato, sinal confirmado, enfraquecimento, suspensão por dados e invalidação;
 - cinco temas, escala de interface e redução de animações;
 - Pixel, o pato trader original, reagindo ao sinal do mercado;
 - scanner e vela atual atualizados continuamente por WebSocket;
@@ -40,7 +41,20 @@ pnpm start
 pnpm build
 ```
 
-O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
+O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas, sinais e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
+
+## Versão 0.9.0
+
+- A leitura bruta e o sinal confirmado são entidades distintas. Um sinal só confirma após avaliações diferentes e estáveis, MTF/qualidade mínimos e uma cotação realtime fresca.
+- Cada confirmação recebe `signalId`, `confirmedAt`, `confirmedPrice`, timestamp da exchange, vela de origem e histórico imutável. Oscilação marginal vira “enfraquecendo”; dados atrasados suspendem a validação sem apagar o sinal.
+- A histerese impede chatter e uma direção oposta precisa invalidar o ciclo atual, formar novo candidato e confirmar novamente.
+- Alertas direcionais consomem a transição `signal-confirmed`; o simulador e a calibração guardam o vínculo com o sinal. A calibração sombra deixou de aprender com leituras transitórias.
+- A IA exige o `analysisId` exato da tela e rejeita snapshot expirado, incompatível ou de baixa qualidade. A resposta mostra provider, modelo, requestId, analysisId, signalId e horários relacionados.
+- Gemini e OpenAI usam adaptadores separados. O diagnóstico executa metadata, geração estruturada, schema, parser e guardrails pelo mesmo fluxo da leitura real.
+- Gemini Auth `AQ.` é preferencial; chaves Standard `AIza` existentes são preservadas, porém identificadas como migração necessária.
+- O guardrail agora entende negações seguras e bloqueia promessas reais. A IA pode ser mais conservadora, mas nunca inverter o motor nem inventar horário/preço do sinal.
+- Health ganhou métricas do lifecycle, telemetria de IA sem segredos e capacidade/atraso do monitor de alertas.
+- O desenho completo está em `SIGNAL_LIFECYCLE_DESIGN.md`; a integração de IA em `AI_INTEGRATION_REPORT.md`; o fechamento da auditoria em `NEXT_FIX_TRACKER.md`.
 
 ## Versão 0.8.0
 

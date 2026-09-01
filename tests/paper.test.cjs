@@ -57,3 +57,9 @@ test("alerta de qualidade exige sinal direcional ativo", async () => {
     assert.equal(hit.hitSignal, "COMPRA");
   } finally { await alerts?.flushPersistence?.(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("alerta direcional dispara somente em evento novo de sinal confirmado", async () => {
+  const dir=temp();let alerts;
+  try{alerts=new AlertsStore(dir,{now:()=>1_700_000_000_000});const created=alerts.add({symbol:"BTCUSDT",interval:"1m",kind:"signal_buy"});assert.equal(alerts.checkAnalysis({symbol:"BTCUSDT",interval:"1m",signal:"COMPRA",confidence:90,price:100,id:"raw",dataQuality:{score:90}}).length,0);const hit=alerts.checkSignalEvent({type:"signal-confirmed",signalId:"signal-1",analysisId:"analysis-1",symbol:"BTCUSDT",interval:"1m",direction:"COMPRA",at:1_700_000_000_100,confirmedPrice:101,confirmedPriceAt:1_700_000_000_090});assert.equal(hit.length,1);assert.equal(hit[0].id,created.id);assert.equal(hit[0].signalId,"signal-1");assert.equal(alerts.checkSignalEvent({type:"signal-confirmed",signalId:"signal-1",symbol:"BTCUSDT",interval:"1m",direction:"COMPRA",at:1_700_000_000_200}).length,0);}
+  finally{await alerts?.flushPersistence?.();fs.rmSync(dir,{recursive:true,force:true});}
+});

@@ -44,14 +44,15 @@ test("diagnóstico Gemini confirma modelo sem revelar a chave", async () => {
   let request;
   global.fetch = async (url, options) => {
     request = { url, options };
-    return { ok: true, status: 200, json: async () => ({ name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", supportedGenerationMethods: ["generateContent"] }) };
+    if (String(url).includes(":generateContent")) return { ok: true, status: 200, headers: new Headers({"x-guploader-uploadid":"diag-gemini"}), json: async () => ({ candidates: [{ finishReason:"STOP", content:{ parts:[{ text:JSON.stringify({veredito:"AGUARDE",resumo:"Diagnóstico",contexto:"Contrato válido",confirmacoes:[],conflitos:[],riscos:["Teste"],gatilho:"Aguardar",invalidacao:"Sem entrada",gerenciamento:"Não operar"}) }] } }] }) };
+    return { ok: true, status: 200, headers:new Headers(), json: async () => ({ name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash", supportedGenerationMethods: ["generateContent"] }) };
   };
   try {
     const reader = new AiReader({ load: () => ({ apiKey: "AQ." + "x".repeat(32), provider: "gemini", model: "gemini-2.5-flash" }) });
     const result = await reader.diagnose();
     assert.equal(result.ok, true);
     assert.equal(result.supportsGenerateContent, true);
-    assert.match(request.url, /models\/gemini-2.5-flash/);
+    assert.match(request.url, /generateContent/);
     assert.equal(request.options.headers["x-goog-api-key"], "AQ." + "x".repeat(32));
     assert.doesNotMatch(JSON.stringify(result), /AQ\./);
   } finally { global.fetch = original; }
@@ -77,10 +78,32 @@ test("diagnóstico rejeita modelo Gemini sem generateContent", async () => {
 });
 
 test("diagnóstico OpenAI consulta e confirma exatamente o modelo escolhido", async () => {
-  const original=global.fetch;let requested;
-  global.fetch=async(url)=>{requested=url;return{ok:true,status:200,json:async()=>({id:"gpt-5"})};};
-  try { const reader=new AiReader({load:()=>({apiKey:"sk-test",provider:"openai",model:"gpt-5"})});const result=await reader.diagnose();assert.match(requested,/\/v1\/models\/gpt-5$/);assert.equal(result.model,"gpt-5"); }
+  const original=global.fetch;const requested=[];
+  global.fetch=async(url)=>{requested.push(url);if(String(url).endsWith("/responses"))return{ok:true,status:200,headers:new Headers({"x-request-id":"diag-openai"}),json:async()=>({output_text:JSON.stringify({veredito:"AGUARDE",resumo:"Diagnóstico",contexto:"Contrato válido",confirmacoes:[],conflitos:[],riscos:["Teste"],gatilho:"Aguardar",invalidacao:"Sem entrada",gerenciamento:"Não operar"})})};return{ok:true,status:200,headers:new Headers(),json:async()=>({id:"gpt-5"})};};
+  try { const reader=new AiReader({load:()=>({apiKey:"sk-test",provider:"openai",model:"gpt-5"})});const result=await reader.diagnose();assert.match(requested[0],/\/v1\/models\/gpt-5$/);assert.match(requested[1],/\/v1\/responses$/);assert.equal(result.model,"gpt-5");assert.equal(result.generationValidated,true); }
   finally { global.fetch=original; }
+});
+
+test("guardrail contextual aceita negações seguras e rejeita promessas", () => {
+  const { violatesGuarantee } = require("../src/engine/ai-reader.cjs");
+  for (const resumo of ["não há certeza", "não existe operação sem risco", "lucro não é garantido", "o movimento pode falhar"]) assert.equal(violatesGuarantee({resumo}), false, resumo);
+  for (const resumo of ["lucro garantido", "você certamente ganhará", "operação sem risco", "100% de certeza de alta"]) assert.equal(violatesGuarantee({resumo}), true, resumo);
+});
+
+test("contrato da IA permite somente veredito igual ou mais conservador", () => {
+  const { enforceVerdict } = require("../src/engine/ai-reader.cjs");
+  assert.equal(enforceVerdict("AGUARDE","COMPRA"),false);assert.equal(enforceVerdict("COMPRA","VENDA"),false);assert.equal(enforceVerdict("VENDA","COMPRA"),false);
+  assert.equal(enforceVerdict("COMPRA","AGUARDE"),true);assert.equal(enforceVerdict("VENDA","VENDA"),true);
+});
+
+test("erros HTTP dos provedores são normalizados por camada", () => {
+  const { providerError } = require("../src/engine/ai-reader.cjs");
+  assert.equal(providerError({provider:"gemini",model:"gemini-2.5-flash",status:401}).code,"AI_AUTH");
+  assert.equal(providerError({provider:"gemini",model:"gemini-2.5-flash",status:403}).code,"AI_FORBIDDEN");
+  assert.equal(providerError({provider:"openai",model:"gpt-5",status:404}).code,"AI_MODEL_NOT_FOUND");
+  assert.equal(providerError({provider:"openai",model:"gpt-5",status:429,body:"quota"}).code,"AI_QUOTA");
+  assert.equal(providerError({provider:"openai",model:"gpt-5",status:500}).code,"AI_UNAVAILABLE");
+  assert.equal(providerError({provider:"gemini",model:"gemini-2.5-flash",status:401,body:'{"error":{"message":"standard key migration required"}}'}).code,"AI_KEY_MIGRATION_REQUIRED");
 });
 
 test("parser aceita invólucro textual mas rejeita resposta truncada", async () => {

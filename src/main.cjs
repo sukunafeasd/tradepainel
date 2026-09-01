@@ -81,7 +81,7 @@ async function start() {
   localAddress = await localServer.listen();
   await createMainWindow();
   if (process.env.DIEFTRADE_SMOKE_SCREENSHOT) {
-    // O executor visual existe apenas no checkout de desenvolvimento e não é empacotado.
+    // Mantido no pacote para validar exatamente o mesmo artefato entregue ao usuário.
     const { runSmoke } = require("../scripts/smoke-runner.cjs");
     await runSmoke(mainWindow, process.env);
     app.quit();

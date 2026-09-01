@@ -13,6 +13,7 @@ const { ExpirySimulator } = require("./engine/expiry-simulator.cjs");
 const { AiReader } = require("./engine/ai-reader.cjs");
 const { AdaptiveCalibrator } = require("./engine/adaptive-calibration.cjs");
 const { ExchangeClock } = require("./engine/clock.cjs");
+const { SignalLifecycleStore } = require("./engine/signal-lifecycle.cjs");
 const { AppError, cleanSymbol, cleanInterval, cleanLimit, plainObject } = require("./engine/contracts.cjs");
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png", ".ico": "image/x-icon", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
@@ -59,10 +60,12 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   const calibrator = new AdaptiveCalibrator(dataDirectory, { now: () => clock.now() });
   const analysisCache = new Map();
   const latestFinalAnalysis = new Map();
+  const analysisById = new Map();
   const paper = new ExpirySimulator(dataDirectory, { now: () => clock.now(), onSettled: (trades) => { calibrator.recordSettled(trades); analysisCache.clear(); } });
   const alerts = new AlertsStore(dataDirectory, { now: () => clock.now() });
   const journal = new JournalStore(dataDirectory, { now: () => clock.now() });
-  const ai = new AiReader(credentialStore, { now: () => clock.now() });
+  const lifecycle = new SignalLifecycleStore(dataDirectory, { now: () => clock.now() });
+  const ai = new AiReader(credentialStore, { now: () => clock.now(), dataDirectory });
   const sseResponses = new Set();
   const rate = new Map();
   const analysisAlertSchedule = new Map();
@@ -73,6 +76,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   let shadowSettlementRunning = false;
   let alertMonitorRunning = false;
   let listening = false;
+  const alertMonitorMetrics = { targetsActive: 0, targetsQueued: 0, oldestCheckAgeMs: 0, averageCheckIntervalMs: 0, maxCheckLagMs: 0, monitorCycleMs: 0, checks: 0, lastChecks: new Map() };
 
   const ALERT_ANALYSIS_INTERVAL_MS = 15000;
   const ALERT_ANALYSIS_RETRY_MS = 5000;
@@ -125,8 +129,23 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (latestFinalAnalysis.has(key)) latestFinalAnalysis.delete(key);
     latestFinalAnalysis.set(key, { savedAtMono: performance.now(), value: structuredClone(value) });
     while (latestFinalAnalysis.size > 250) latestFinalAnalysis.delete(latestFinalAnalysis.keys().next().value);
-    try { calibrator.observeSignal?.(value); }
-    catch (error) { log("warn", "shadow_calibration_observe_failed", { symbol: value?.symbol, interval: value?.interval, message: error.message }); }
+    if (value?.id) { if (analysisById.has(value.id)) analysisById.delete(value.id); analysisById.set(value.id, { savedAtMono: performance.now(), value: structuredClone(value) }); while (analysisById.size > 500) analysisById.delete(analysisById.keys().next().value); }
+  };
+  const processFinalAnalysis = async (value) => {
+    let datum = priceDatums()[value.symbol];
+    if (!datum) { try { datum = (await marketClient.ticker(value.symbol, { force: true })).datum; } catch {} }
+    const evaluated = lifecycle.evaluate(value, datum, clock.now());
+    const final = { ...value, signalLifecycle: evaluated.current };
+    setLatestAnalysis(`${final.symbol}|${final.interval}`, final);
+    for (const event of evaluated.events) {
+      live.publish?.(event.type, event);
+      if (event.type === "signal-confirmed") {
+        try { calibrator.observeConfirmedSignal?.(evaluated.current, final); } catch (error) { log("warn", "shadow_calibration_observe_failed", { signalId: event.signalId, message: error.message }); }
+        alerts.checkSignalEvent?.(event).forEach((alert) => live.publish?.("alert", alert));
+      }
+    }
+    alerts.checkAnalysis(final).forEach((alert) => live.publish?.("alert", alert));
+    return final;
   };
   const mapLimited = async (items, concurrency, worker) => {
     let cursor = 0;
@@ -192,23 +211,28 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   }
 
   async function monitorAnalysisAlerts() {
+    const cycleStarted = performance.now();
     if (!listening || alertMonitorRunning) return;
     const targets = alerts.analysisTargets();
     const activeKeys = new Set(targets.map(({ symbol, interval }) => `${symbol}|${interval}`));
+    alertMonitorMetrics.targetsActive = targets.length;
     for (const key of analysisAlertSchedule.keys()) if (!activeKeys.has(key)) analysisAlertSchedule.delete(key);
     if (!targets.length) return;
     const nowMono = performance.now();
     for (const target of targets) { const key = `${target.symbol}|${target.interval}`; if (!analysisAlertSchedule.has(key)) analysisAlertSchedule.set(key, { nextCheckAtMono: 0, failures: 0 }); }
     const due = targets.filter((target) => Number(analysisAlertSchedule.get(`${target.symbol}|${target.interval}`)?.nextCheckAtMono || 0) <= nowMono).sort((left, right) => Number(analysisAlertSchedule.get(`${left.symbol}|${left.interval}`)?.nextCheckAtMono || 0) - Number(analysisAlertSchedule.get(`${right.symbol}|${right.interval}`)?.nextCheckAtMono || 0)).slice(0, ALERT_ANALYSIS_BATCH);
+    alertMonitorMetrics.targetsQueued = targets.filter((target) => Number(analysisAlertSchedule.get(`${target.symbol}|${target.interval}`)?.nextCheckAtMono || 0) <= nowMono).length;
+    const lags = targets.map((target) => Math.max(0, nowMono - Number(analysisAlertSchedule.get(`${target.symbol}|${target.interval}`)?.nextCheckAtMono || nowMono)));
+    alertMonitorMetrics.oldestCheckAgeMs = lags.length ? Math.round(Math.max(...lags)) : 0;
+    alertMonitorMetrics.maxCheckLagMs = Math.max(alertMonitorMetrics.maxCheckLagMs, alertMonitorMetrics.oldestCheckAgeMs);
     if (!due.length) return;
     alertMonitorRunning = true;
     try {
       await mapLimited(due, ALERT_ANALYSIS_CONCURRENCY, async ({ symbol, interval }) => {
         const key = `${symbol}|${interval}`;
         try {
-          const base = await getAnalysis(symbol, interval); const final = applyMtfGate(base, await getConfluence(symbol, interval));
-          setLatestAnalysis(key, final);
-          alerts.checkAnalysis(final).forEach((alert) => live.publish?.("alert", alert));
+          const base = await getAnalysis(symbol, interval); const final = await processFinalAnalysis(applyMtfGate(base, await getConfluence(symbol, interval)));
+          const last = alertMonitorMetrics.lastChecks.get(key); if (last) alertMonitorMetrics.averageCheckIntervalMs = alertMonitorMetrics.averageCheckIntervalMs ? Math.round((alertMonitorMetrics.averageCheckIntervalMs * 0.8) + ((performance.now() - last) * 0.2)) : Math.round(performance.now() - last); alertMonitorMetrics.lastChecks.set(key, performance.now()); alertMonitorMetrics.checks += 1;
           analysisAlertSchedule.set(key, { nextCheckAtMono: performance.now() + ALERT_ANALYSIS_INTERVAL_MS, failures: 0 });
         } catch (error) {
           const failures = Number(analysisAlertSchedule.get(key)?.failures || 0) + 1;
@@ -216,7 +240,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
           log("warn", "alert_monitor_failed", { symbol, interval, failures, message: error.message });
         }
       });
-    } finally { alertMonitorRunning = false; }
+    } finally { alertMonitorRunning = false; alertMonitorMetrics.monitorCycleMs = Math.round(performance.now() - cycleStarted); }
   }
 
   const syncAlertPriceSubscriptions = () => live.watchPriceSymbols?.(alerts.priceSymbols());
@@ -247,7 +271,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
       const snapshot = live.snapshot();
       const paperDiagnostics = paper.store.diagnostics(); const archiveDiagnostics = paper.archive?.diagnostics?.() || { issues: [] };
-      return json(res, 200, { ok: true, version: packageJson.version, uptimeSeconds: Math.round(process.uptime()), live: snapshot, market: marketClient.status(), ai: credentialStore.status(), calibration: calibrator.status(), alertMonitor: { activeTargets: alerts.analysisTargets().length, scheduledTargets: analysisAlertSchedule.size, batchSize: ALERT_ANALYSIS_BATCH, concurrency: ALERT_ANALYSIS_CONCURRENCY }, memory: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) }, clock: clock.status(), persistence: { paper: { ...paperDiagnostics, archive: archiveDiagnostics, issues: [...(paperDiagnostics.issues || []), ...(archiveDiagnostics.issues || [])] }, alerts: alerts.store.diagnostics(), journal: journal.store.diagnostics(), calibration: calibrator.store?.diagnostics?.() || { issues: [] } }, safety: { realOrders: false, publicMarketDataOnly: true } });
+      return json(res, 200, { ok: true, version: packageJson.version, uptimeSeconds: Math.round(process.uptime()), live: snapshot, market: marketClient.status(), ai: { ...credentialStore.status(), telemetry: ai.telemetry() }, calibration: calibrator.status(), signalLifecycle: lifecycle.health(), alertMonitor: { activeTargets: alerts.analysisTargets().length, scheduledTargets: analysisAlertSchedule.size, batchSize: ALERT_ANALYSIS_BATCH, concurrency: ALERT_ANALYSIS_CONCURRENCY, ...Object.fromEntries(Object.entries(alertMonitorMetrics).filter(([key]) => key !== "lastChecks")) }, memory: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) }, clock: clock.status(), persistence: { paper: { ...paperDiagnostics, archive: archiveDiagnostics, issues: [...(paperDiagnostics.issues || []), ...(archiveDiagnostics.issues || [])] }, alerts: alerts.store.diagnostics(), journal: journal.store.diagnostics(), calibration: calibrator.store?.diagnostics?.() || { issues: [] }, signals: lifecycle.store.diagnostics() }, safety: { realOrders: false, publicMarketDataOnly: true } });
     }
     if (pathname === "/api/health/readiness") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
@@ -259,7 +283,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       let coins = live.marketSnapshot();
       try { const rest = await marketClient.topPairs("USDT", 220); coins = [...new Map([...rest, ...coins].map((item) => [item.symbol, item])).values()].sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, 220); }
       catch (error) { log("warn", "bootstrap_rest_degraded", { message: error.message }); }
-      return json(res, 200, { degraded: !coins.length, coins, selected: { symbol: live.symbol, interval: live.interval }, paper: paper.snapshot(priceDatums(), clock.now()), alerts: alerts.list(), journal: journal.page({ limit: 25 }), ai: credentialStore.status(), calibration: calibrator.status() });
+      return json(res, 200, { degraded: !coins.length, coins, selected: { symbol: live.symbol, interval: live.interval }, paper: paper.snapshot(priceDatums(), clock.now()), alerts: alerts.list(), journal: journal.page({ limit: 25 }), ai: credentialStore.status(), calibration: calibrator.status(), signals: lifecycle.current() });
     }
     if (pathname === "/api/coins") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
@@ -290,9 +314,8 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if ((match = pathname.match(/^\/api\/analysis\/([A-Za-z0-9]+)$/))) {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
       const symbol = cleanSymbol(match[1]); const interval = cleanInterval(url.searchParams.get("interval")); const force = url.searchParams.get("force") === "1";
-      const base = await getAnalysis(symbol, interval, { force }); const mtf = await getConfluence(symbol, interval, force); const final = applyMtfGate(base, mtf);
-      setLatestAnalysis(`${symbol}|${interval}`, final);
-      alerts.checkAnalysis(final).forEach((alert) => live.publish?.("alert", alert)); return json(res, 200, final);
+      const base = await getAnalysis(symbol, interval, { force }); const mtf = await getConfluence(symbol, interval, force); const final = await processFinalAnalysis(applyMtfGate(base, mtf));
+      return json(res, 200, final);
     }
     if ((match = pathname.match(/^\/api\/confluence\/([A-Za-z0-9]+)$/))) {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
@@ -307,7 +330,9 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       // recente, e captura a cotação autoritativa no exato momento da confirmação.
       let datum = priceDatums()[symbol];
       if (!datum) { const ticker = await marketClient.ticker(symbol, { force: true }); datum = ticker.datum; }
-      const trade = paper.place({ ...input, symbol, interval, entryDatum: datum, entryPrice: undefined, analysisSnapshot: AdaptiveCalibrator.snapshot(reading), idempotencyKey: req.headers["idempotency-key"] || input.idempotencyKey, now: clock.now() });
+      const signal = lifecycle.get(symbol, interval);
+      if (input.signalId && signal?.signalId !== input.signalId) throw new AppError("O sinal selecionado não é mais o sinal atual. Atualize a leitura.", { status: 409, code: "SIGNAL_MISMATCH" });
+      const trade = paper.place({ ...input, symbol, interval, entryDatum: datum, entryPrice: undefined, analysisSnapshot: AdaptiveCalibrator.snapshot(reading), signalContext: signal?.signalId ? { signalId: signal.signalId, signalConfirmedAt: signal.confirmedAt, signalConfirmedPrice: signal.confirmedPrice, signalAgeAtOrder: Math.max(0, clock.now() - Number(signal.confirmedAt)), analysisId: reading?.id || null } : null, idempotencyKey: req.headers["idempotency-key"] || input.idempotencyKey, now: clock.now() });
       await paper.flushPersistence?.();
       return json(res, 201, { trade, confirmedEntryPrice: trade.entryPrice, confirmedEntryPriceAt: trade.entryPriceAt, portfolio: paper.snapshot(priceDatums(), clock.now()) });
     }
@@ -327,16 +352,21 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (pathname === "/api/ai/config" && req.method === "GET") return json(res, 200, credentialStore.status());
     if (pathname === "/api/ai/config" && req.method === "POST") {
       const input = await body(req); const temporary = { load: () => ({ apiKey: String(input.apiKey || "").trim(), provider: input.provider, model: input.model }), status: () => ({ stored: true, operational: true }) };
-      await new AiReader(temporary, { cooldownMs: 0, dailyLimit: 2 }).diagnose(); return json(res, 200, credentialStore.save(input));
+      const diagnostic = await new AiReader(temporary, { cooldownMs: 0, dailyLimit: 2 }).diagnose(); return json(res, 200, { ...credentialStore.save(input), diagnostic });
     }
     if (pathname === "/api/ai/config" && req.method === "DELETE") return json(res, 200, credentialStore.remove());
     if (pathname === "/api/ai/test" && req.method === "POST") { await body(req); return json(res, 200, await ai.diagnose()); }
     if (pathname === "/api/ai/read" && req.method === "POST") {
-      const input = await body(req); const symbol = cleanSymbol(input.symbol || live.symbol); const interval = cleanInterval(input.interval || live.interval); const key = `${symbol}|${interval}`; const recent = latestFinalAnalysis.get(key);
-      let analysis = recent && performance.now() - recent.savedAtMono <= 30000 ? structuredClone(recent.value) : null;
-      if (!analysis) { const base = await getAnalysis(symbol, interval); analysis = applyMtfGate(base, await getConfluence(symbol, interval)); setLatestAnalysis(key, analysis); }
+      const input = await body(req); const symbol = cleanSymbol(input.symbol); const interval = cleanInterval(input.interval); const analysisId = String(input.analysisId || "");
+      if (!analysisId) throw new AppError("Atualize a leitura antes de pedir a IA.", { status: 409, code: "AI_ANALYSIS_ID_REQUIRED" });
+      const stored = analysisById.get(analysisId); const analysis = stored && performance.now() - stored.savedAtMono <= 30_000 ? structuredClone(stored.value) : null;
+      if (!analysis) throw new AppError("A análise exibida expirou. Atualize-a e tente novamente.", { status: 409, code: "AI_ANALYSIS_STALE" });
+      if (analysis.symbol !== symbol || analysis.interval !== interval) throw new AppError("A análise não pertence ao par e timeframe exibidos.", { status: 409, code: "AI_ANALYSIS_MISMATCH" });
+      if (Number(analysis.dataQuality?.score || 0) < 60) throw new AppError("Os dados desta análise não têm qualidade ou atualidade suficiente para a IA.", { status: 409, code: "AI_ANALYSIS_LOW_QUALITY" });
       return json(res, 200, await ai.read(analysis));
     }
+    if (pathname === "/api/signals/current" && req.method === "GET") return json(res, 200, lifecycle.current({ symbol: url.searchParams.get("symbol") || null, interval: url.searchParams.get("interval") || null }));
+    if (pathname === "/api/signals/history" && req.method === "GET") return json(res, 200, lifecycle.history({ symbol: url.searchParams.get("symbol") || null, interval: url.searchParams.get("interval") || null, direction: url.searchParams.get("direction") || null, from: url.searchParams.get("from"), to: url.searchParams.get("to"), limit: cleanLimit(url.searchParams.get("limit"), 200, 1000) }));
     if (pathname === "/api/calibration" && req.method === "GET") return json(res, 200, calibrator.status());
     if (pathname === "/api/calibration/reset" && req.method === "POST") { const input = await body(req); if (input.confirm !== true) throw new AppError("Confirme a limpeza da calibração.", { status: 409, code: "CONFIRM_REQUIRED" }); analysisCache.clear(); await calibrator.flushPersistence?.(); const status = calibrator.reset(); await calibrator.flushPersistence?.(); return json(res, 200, status); }
     return fail(res, 404, "Rota não encontrada.", "NOT_FOUND");
@@ -365,7 +395,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   });
 
   return {
-    token, live, market: marketClient, clock, paper, alerts, journal, calibrator,
+    token, live, market: marketClient, clock, paper, alerts, journal, calibrator, lifecycle, ai,
     listen(port = 0) {
       return new Promise((resolve, reject) => {
         server.once("error", reject);
@@ -380,7 +410,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       listening = false; if (settlementTimer) clearInterval(settlementTimer); if (alertMonitorTimer) clearInterval(alertMonitorTimer); settlementTimer = null; alertMonitorTimer = null;
       live.off?.("price", onPrice); live.off?.("market-price", onMarketPrice); live.off?.("alert-price", onAlertPrice); live.close(); marketClient.close?.();
       for (const entry of sseResponses) { clearInterval(entry.keepAlive); entry.remove(); entry.writer?.close(); try { entry.res.end(); } catch {} } sseResponses.clear();
-      const persistenceFlushes = await Promise.allSettled([paper.flushPersistence?.(), alerts.flushPersistence?.(), journal.flushPersistence?.(), calibrator.flushPersistence?.()]);
+      const persistenceFlushes = await Promise.allSettled([paper.flushPersistence?.(), alerts.flushPersistence?.(), journal.flushPersistence?.(), calibrator.flushPersistence?.(), lifecycle.flushPersistence?.(), ai.flushPersistence?.()]);
       persistenceFlushes.filter((item) => item.status === "rejected").forEach((item) => log("error", "persistence_flush_failed", { message: item.reason?.message || "Falha ao esvaziar fila" }));
       if (!server.listening) return;
       await new Promise((resolve) => {

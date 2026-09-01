@@ -39,3 +39,8 @@ test("credencial corrompida não é anunciada como operacional", () => {
     assert.match(store.status().error, /corrompida/i);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("Gemini Auth é preferencial e Standard existente exige migração sem ser apagada", () => {
+  const dir=temporary();try{const store=new CredentialStore(dir,secureStorage);const auth=store.save({apiKey:`AQ.${"a".repeat(30)}`,provider:"gemini",model:"gemini-2.5-flash"});assert.equal(auth.keyType,"auth");assert.equal(auth.migrationRequired,false);const standardKey=`AIza${"b".repeat(30)}`;const legacy=store.save({apiKey:standardKey,provider:"gemini",model:"gemini-2.5-flash"});assert.equal(legacy.keyType,"standard");assert.equal(legacy.migrationRequired,true);assert.equal(store.load().apiKey,standardKey);assert.match(legacy.recommendation,/AQ\./);}
+  finally{fs.rmSync(dir,{recursive:true,force:true});}
+});

@@ -59,6 +59,8 @@ function validTradeBase(trade) {
     && finite(trade.payoutRate) && Number(trade.payoutRate) >= 0.5 && Number(trade.payoutRate) <= 0.98
     && typeof trade.note === "string" && trade.note.length <= 300
     && validAnalysisSnapshot(trade.analysisSnapshot)
+    && (trade.signalId == null || (validId(trade.signalId) && validTimestamp(trade.signalConfirmedAt) && positive(trade.signalConfirmedPrice) && nonNegative(trade.signalAgeAtOrder)))
+    && (trade.sourceAnalysisId == null || (typeof trade.sourceAnalysisId === "string" && trade.sourceAnalysisId.length <= 240))
     && Number.isInteger(Number(trade.settlementAttempts || 0)) && Number(trade.settlementAttempts || 0) >= 0
     && (trade.currentPrice == null || positive(trade.currentPrice))
     && (trade.currentPriceAt == null || validTimestamp(trade.currentPriceAt))
@@ -221,7 +223,7 @@ class ExpirySimulator {
     return null;
   }
 
-  place({ symbol, direction, stake, entryPrice, entryDatum = null, durationMs, interval = "1m", note = "", analysisSnapshot = null, idempotencyKey = null, now = this.now() }) {
+  place({ symbol, direction, stake, entryPrice, entryDatum = null, durationMs, interval = "1m", note = "", analysisSnapshot = null, signalContext = null, idempotencyKey = null, now = this.now() }) {
     const data = this.store.value;
     const clean = cleanSymbol(symbol); const frame = cleanInterval(interval); const amount = money(finiteNumber(stake, "Valor", { min: 1 })); const duration = finiteNumber(durationMs, "Duração", { min: 1 });
     if (!ALLOWED_DURATIONS.has(duration)) throw new AppError("Duração inválida. Use uma opção disponível na interface.", { code: "INVALID_DURATION" });
@@ -233,7 +235,8 @@ class ExpirySimulator {
     const legacyPrice = Number(entryPrice);
     const datum = entryDatum ? validateMarketDatum(entryDatum, { symbol: clean, maxAgeMs: 2000, now }) : Number.isFinite(legacyPrice) && legacyPrice > 0 ? { symbol: clean, value: legacyPrice, exchangeTimestamp: now, receivedAt: now, source: "validated-caller", stale: false } : null;
     if (!datum || datum.stale) throw new AppError("Preço de entrada fresco indisponível.", { status: 503, code: "FRESH_PRICE_UNAVAILABLE" });
-    const trade = { id: id(), symbol: clean, direction, stake: amount, entryPrice: datum.value, currentPrice: datum.value, entryPriceAt: datum.exchangeTimestamp, entryPriceSource: datum.source, openedAt: now, expiresAt: now + duration, durationMs: duration, interval: frame, payoutRate: data.payoutRate, note: String(note || "").slice(0, 300), analysisSnapshot, status: "open", settlementAttempts: 0 };
+    const linkedSignal = signalContext?.signalId ? { signalId: String(signalContext.signalId).slice(0, 128), signalConfirmedAt: Number(signalContext.signalConfirmedAt), signalConfirmedPrice: Number(signalContext.signalConfirmedPrice), signalAgeAtOrder: Math.max(0, Number(signalContext.signalAgeAtOrder) || 0), sourceAnalysisId: signalContext.analysisId ? String(signalContext.analysisId).slice(0, 240) : null } : {};
+    const trade = { id: id(), symbol: clean, direction, stake: amount, entryPrice: datum.value, currentPrice: datum.value, entryPriceAt: datum.exchangeTimestamp, entryPriceSource: datum.source, openedAt: now, expiresAt: now + duration, durationMs: duration, interval: frame, payoutRate: data.payoutRate, note: String(note || "").slice(0, 300), analysisSnapshot, ...linkedSignal, status: "open", settlementAttempts: 0 };
     data.balance = money(data.balance - amount); data.open.push(trade); if (normalizedIdempotencyKey) data.idempotency[normalizedIdempotencyKey] = trade.id; data.updatedAt = now; this.#pruneIdempotency(); this.#saveState(); return trade;
   }
 

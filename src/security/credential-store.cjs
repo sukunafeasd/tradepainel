@@ -27,10 +27,11 @@ class CredentialStore {
     const settings = readJson(this.file, {});
     const provider = settings.provider || (settings.openaiKey ? "openai" : "gemini");
     let decryptable = false;
+    let decryptedType = settings.keyType || null;
     let error = null;
     const encryptedKey = settings.aiKey || settings.openaiKey;
     if (encryptedKey && this.secureStorage.isEncryptionAvailable()) {
-      try { decryptable = Boolean(this.secureStorage.decryptString(Buffer.from(encryptedKey, "base64"))); }
+      try { const decrypted = this.secureStorage.decryptString(Buffer.from(encryptedKey, "base64")); decryptable = Boolean(decrypted); if (provider === "gemini") decryptedType = classifyGeminiKey(decrypted); }
       catch { error = "A credencial protegida está corrompida ou pertence a outro perfil do Windows."; }
     }
     return {
@@ -39,7 +40,9 @@ class CredentialStore {
       operational: Boolean(encryptedKey) && decryptable,
       provider,
       model: settings.model || (provider === "gemini" ? "gemini-2.5-flash" : "gpt-5"),
-      keyType: settings.keyType || null,
+      keyType: decryptedType,
+      migrationRequired: provider === "gemini" && ["standard", "legacy"].includes(decryptedType),
+      recommendation: provider === "gemini" && ["standard", "legacy"].includes(decryptedType) ? "Migre para uma Gemini Auth key iniciada por AQ.; a credencial atual foi preservada." : null,
       encryptionAvailable: this.secureStorage.isEncryptionAvailable(),
       error,
     };
@@ -55,7 +58,7 @@ class CredentialStore {
       try { apiKey = this.secureStorage.decryptString(Buffer.from(encryptedKey, "base64")); }
       catch (error) { throw new Error("A chave protegida não pôde ser descriptografada. Remova-a e salve uma nova.", { cause: error }); }
     }
-    return { apiKey, provider, model: settings.model || (provider === "gemini" ? "gemini-2.5-flash" : "gpt-5") };
+    return { apiKey, provider, model: settings.model || (provider === "gemini" ? "gemini-2.5-flash" : "gpt-5"), keyType: provider === "gemini" ? classifyGeminiKey(apiKey) : "secret" };
   }
 
   save({ apiKey, provider = "gemini", model }) {
@@ -64,7 +67,7 @@ class CredentialStore {
     const cleanProvider = provider === "openai" ? "openai" : "gemini";
     if (cleanProvider === "openai" && !/^sk-[A-Za-z0-9_\-]{20,}$/.test(key)) throw new Error("Essa não parece ser uma chave da OpenAI.");
     const geminiKeyType = cleanProvider === "gemini" ? classifyGeminiKey(key) : null;
-    if (cleanProvider === "gemini" && !geminiKeyType) throw new Error("Essa não parece ser uma chave válida da API Gemini. Chaves Auth atuais começam com AQ. e também são aceitas.");
+    if (cleanProvider === "gemini" && !geminiKeyType) throw new Error("Essa não parece ser uma chave válida da API Gemini. A chave Auth atual deve começar com AQ.");
     const fallbackModel = cleanProvider === "gemini" ? "gemini-2.5-flash" : "gpt-5";
     const cleanModel = String(model || fallbackModel).trim();
     if (!/^[A-Za-z0-9._-]{2,80}$/.test(cleanModel)) throw new Error("Nome de modelo inválido.");

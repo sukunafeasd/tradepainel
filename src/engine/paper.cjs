@@ -64,10 +64,22 @@ class AlertsStore {
     const hits = [];
     for (const alert of this.store.value) {
       if (!alert.active || alert.symbol !== analysis.symbol || alert.interval !== analysis.interval) continue;
-      const hit = alert.kind === "signal_buy" ? analysis.signal === "COMPRA" : alert.kind === "signal_sell" ? analysis.signal === "VENDA" : alert.kind === "confidence_gte" ? Number(analysis.confidence) >= Number(alert.value) && analysis.signal !== "AGUARDE" : false;
+      const hit = alert.kind === "confidence_gte" ? Number(analysis.confidence) >= Number(alert.value) && analysis.signal !== "AGUARDE" : false;
       if (hit) { alert.active = false; alert.triggeredAt = this.now(); alert.hitPrice = analysis.price; alert.hitSignal = analysis.signal; alert.hitConfidence = analysis.confidence; alert.analysisId = analysis.id; hits.push(structuredClone(alert)); }
     }
     if (hits.length) this.store.saveQueued(); return hits;
+  }
+  checkSignalEvent(event) {
+    if (!event || event.type !== "signal-confirmed" || !["COMPRA", "VENDA"].includes(event.direction)) return [];
+    const hits = [];
+    for (const alert of this.store.value) {
+      if (!alert.active || alert.symbol !== event.symbol || alert.interval !== event.interval) continue;
+      const hit = alert.kind === "signal_buy" ? event.direction === "COMPRA" : alert.kind === "signal_sell" ? event.direction === "VENDA" : false;
+      if (!hit) continue;
+      alert.active = false; alert.triggeredAt = Number(event.at) || this.now(); alert.hitPrice = Number(event.confirmedPrice) || null; alert.hitPriceAt = Number(event.confirmedPriceAt) || null; alert.hitSignal = event.direction; alert.signalId = event.signalId; alert.analysisId = event.analysisId || null; hits.push(structuredClone(alert));
+    }
+    if (hits.length) this.store.saveQueued();
+    return hits;
   }
   priceSymbols() {
     return [...new Set(this.store.value.filter((alert) => alert.active && ["price_gte", "price_lte"].includes(alert.kind)).map((alert) => alert.symbol))];

@@ -49,7 +49,7 @@ test("compatibilidade de horizonte possui limite mínimo e máximo", () => {
   assert.equal(horizonCompatibility(1_125_001, 900_000).reason, "horizonte_muito_longo");
 });
 
-test("schema v4 valida profundamente buckets, grupos, recentes e pendências shadow", () => {
+test("schema v5 valida profundamente buckets, grupos, recentes e pendências shadow", () => {
   const clean = initial(1_700_000_000_000);
   assert.equal(validate(clean), true);
   assert.equal(validate({ ...clean, buckets: { global: { samples: 2, hits: 2, misses: 2 } } }), false);
@@ -65,7 +65,7 @@ test("schema v4 valida profundamente buckets, grupos, recentes e pendências sha
   assert.equal(validate(legacy), true);
 });
 
-test("shadow calibration observa uma vez por vela e calibra timeframes longos sem operação demo", () => {
+test("shadow calibration observa somente sinais confirmados e calibra timeframes longos", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dieftrade-shadow-calibration-"));
   let now = 1_700_000_000_000;
   try {
@@ -75,12 +75,14 @@ test("shadow calibration observa uma vez por vela e calibra timeframes longos se
       confidence: 72, score: 45, latestCandleCloseTime: now - 1,
       reasons: [{ group: "momentum", points: 10 }],
     };
-    const first = calibration.observeSignal(analysis);
+    const signal = { signalId: "confirmed-signal-0001", symbol: "BTCUSDT", interval: "1h", direction: "COMPRA", confirmedPrice: 100, confirmedAt: now, confidenceAtConfirm: 72, scoreAtConfirm: 45, analysisId: "analysis-1" };
+    const first = calibration.observeConfirmedSignal(signal, { ...analysis, id: "analysis-1" });
     assert.equal(first.recorded, true);
-    assert.equal(calibration.observeSignal(analysis).reason, "duplicado");
+    assert.equal(calibration.observeConfirmedSignal(signal, analysis).reason, "duplicado");
     assert.equal(calibration.shadowDue(now).length, 0);
 
     calibration.recordSettled([{
+      signalId: signal.signalId,
       entryPrice: 100, exitPrice: 102, closedAt: now + 900_000, durationMs: 3_600_000, result: "win",
       analysisSnapshot: { ...analysis, expectedHorizonMs: 3_600_000 },
     }]);
@@ -92,7 +94,8 @@ test("shadow calibration observa uma vez por vela e calibra timeframes longos se
     const settled = calibration.settleShadow({ [due[0].id]: { value: 102, exchangeTimestamp: due[0].dueAt, source: "historical-test" } }, now);
     assert.equal(settled[0].outcome, "hit");
     assert.equal(calibration.profile({ symbol: "BTCUSDT", interval: "1h" }).pairSamples, 1);
-    assert.deepEqual(calibration.status().shadow, { pending: 0, settled: 1, skipped: 0 });
+    assert.equal(calibration.status().shadow.pendingObservations, 0);
+    assert.equal(calibration.status().shadow.completedObservations, 1);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
