@@ -177,23 +177,81 @@ class MarketClient {
     const clean = cleanSymbol(symbol);
     // O ticker de 24 h entrega last/bid/ask no mesmo snapshot HTTP. Isso evita
     // combinar respostas obtidas em instantes diferentes.
-    const snapshot = await this.get("/api/v3/ticker/24hr", { symbol: clean }, 500, { force });
+    const [snapshot, datum] = await Promise.all([
+      this.get("/api/v3/ticker/24hr", { symbol: clean }, 500, { force }),
+      this.latestTradeDatum(clean, { force }),
+    ]);
     const last = finiteNumber(snapshot.lastPrice, "Último preço", { min: Number.MIN_VALUE });
     const bid = finiteNumber(snapshot.bidPrice, "Bid", { min: Number.MIN_VALUE });
     const ask = finiteNumber(snapshot.askPrice, "Ask", { min: Number.MIN_VALUE });
     if (bid > ask) throw new Error("Ticker REST inválido: bid acima do ask.");
     const mid = (bid + ask) / 2;
+    return { symbol: clean, last, bid, ask, spread: ask - bid, spreadPct: ((ask - bid) / mid) * 100, datum };
+  }
+
+  async latestTradeDatum(symbol, { force = true } = {}) {
+    const clean = cleanSymbol(symbol);
+    // /ticker/24hr não informa quando o lastPrice realmente negociou. Para
+    // entradas autoritativas usamos o negócio agregado mais recente, cujo T é
+    // fornecido pela própria exchange. Um ativo ilíquido passa, assim, pelas
+    // regras normais de freshness em vez de ganhar um timestamp local fictício.
+    const rows = await this.get("/api/v3/aggTrades", { symbol: clean, limit: 1 }, 0, { force });
+    const row = Array.isArray(rows) ? rows.at(-1) : null;
+    const value = Number(row?.p);
+    const exchangeTimestamp = Number(row?.T);
+    if (!(value > 0) || !Number.isFinite(exchangeTimestamp)) throw new Error("A Binance não retornou um último negócio válido.");
     const receivedAt = this.clock.now();
-    return { symbol: clean, last, bid, ask, spread: ask - bid, spreadPct: ((ask - bid) / mid) * 100, datum: { symbol: clean, value: last, exchangeTimestamp: receivedAt, receivedAt, source: "binance-rest-ticker", stale: false } };
+    const datum = validateMarketDatum({ symbol: clean, value, exchangeTimestamp, receivedAt, source: "binance-rest-aggtrade", stale: false, tradeId: row.a }, { symbol: clean, now: receivedAt });
+    if (!datum) throw new Error("O último negócio retornado pela Binance possui horário inválido.");
+    return datum;
   }
 
   async priceAt(symbol, timestamp, { toleranceMs = 1500 } = {}) {
     const clean = cleanSymbol(symbol);
     const target = finiteNumber(timestamp, "Horário de expiração");
-    const rows = await this.get("/api/v3/aggTrades", { symbol: clean, startTime: Math.floor(target - toleranceMs), endTime: Math.floor(target), limit: 1000 }, 0, { force: true });
-    const candidates = (rows || []).map((row) => ({ value: Number(row.p), exchangeTimestamp: Number(row.T), id: row.a })).filter((row) => Number.isFinite(row.value) && row.value > 0 && Number.isFinite(row.exchangeTimestamp) && row.exchangeTimestamp <= target);
-    candidates.sort((a, b) => b.exchangeTimestamp - a.exchangeTimestamp);
-    const closest = candidates[0];
+    const startTime = Math.floor(target - toleranceMs);
+    const endTime = Math.floor(target);
+    let params = { symbol: clean, startTime, endTime, limit: 1000 };
+    let closest = null;
+    let previousLastId = null;
+
+    // A Binance devolve no máximo 1000 aggTrades por página e, com uma janela
+    // temporal, começa pela cabeça da janela. Em momentos muito ativos isso não
+    // contém necessariamente o último negócio antes do vencimento. Seguimos os
+    // IDs até alcançar a cauda (ou o primeiro negócio posterior), sem jamais
+    // aceitar uma cotação posterior ao target.
+    for (;;) {
+      const rows = await this.get("/api/v3/aggTrades", params, 0, { force: true });
+      if (!Array.isArray(rows) || rows.length === 0) break;
+
+      let lastId = null;
+      let reachedAfterTarget = false;
+      for (const row of rows) {
+        const value = Number(row?.p);
+        const exchangeTimestamp = Number(row?.T);
+        const id = Number(row?.a);
+        if (Number.isSafeInteger(id) && (lastId == null || id > lastId)) lastId = id;
+        if (Number.isFinite(exchangeTimestamp) && exchangeTimestamp > target) {
+          reachedAfterTarget = true;
+          continue;
+        }
+        if (!(value > 0) || !Number.isFinite(exchangeTimestamp) || exchangeTimestamp < startTime) continue;
+        if (!closest || exchangeTimestamp > closest.exchangeTimestamp || (exchangeTimestamp === closest.exchangeTimestamp && Number.isSafeInteger(id) && id > Number(closest.id))) {
+          closest = { value, exchangeTimestamp, id: row.a };
+        }
+      }
+
+      if (reachedAfterTarget || rows.length < 1000) break;
+      if (!Number.isSafeInteger(lastId) || (previousLastId != null && lastId <= previousLastId)) {
+        throw new Error("Não foi possível paginar o histórico da Binance com segurança.");
+      }
+      previousLastId = lastId;
+      // fromId fornece continuidade exata inclusive quando milhares de trades
+      // compartilham o mesmo milissegundo. A próxima página pode atravessar o
+      // vencimento; esses itens são filtrados e encerram a busca.
+      params = { symbol: clean, fromId: lastId + 1, limit: 1000 };
+    }
+
     if (!closest || target - closest.exchangeTimestamp > toleranceMs) return null;
     return validateMarketDatum({ symbol: clean, value: closest.value, exchangeTimestamp: closest.exchangeTimestamp, receivedAt: this.clock.now(), source: "binance-aggtrade-history", stale: false, tradeId: closest.id }, { symbol: clean, now: this.clock.now() });
   }

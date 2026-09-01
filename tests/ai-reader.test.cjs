@@ -69,6 +69,20 @@ test("falha do provedor não consome a única leitura diária", async () => {
   } finally { global.fetch = original; }
 });
 
+test("diagnóstico rejeita modelo Gemini sem generateContent", async () => {
+  const original=global.fetch;
+  global.fetch=async()=>({ok:true,status:200,json:async()=>({name:"models/gemini-2.5-flash",supportedGenerationMethods:["countTokens"]})});
+  try { const reader=new AiReader({load:()=>({apiKey:"AQ."+"x".repeat(32),provider:"gemini",model:"gemini-2.5-flash"})}); await assert.rejects(()=>reader.diagnose(),error=>error.code==="AI_MODEL_UNSUPPORTED"); }
+  finally { global.fetch=original; }
+});
+
+test("diagnóstico OpenAI consulta e confirma exatamente o modelo escolhido", async () => {
+  const original=global.fetch;let requested;
+  global.fetch=async(url)=>{requested=url;return{ok:true,status:200,json:async()=>({id:"gpt-5"})};};
+  try { const reader=new AiReader({load:()=>({apiKey:"sk-test",provider:"openai",model:"gpt-5"})});const result=await reader.diagnose();assert.match(requested,/\/v1\/models\/gpt-5$/);assert.equal(result.model,"gpt-5"); }
+  finally { global.fetch=original; }
+});
+
 test("parser aceita invólucro textual mas rejeita resposta truncada", async () => {
   const { parseJson } = require("../src/engine/ai-reader.cjs");
   const value = { veredito: "AGUARDE", resumo: "Teste", contexto: "Contexto", confirmacoes: [], conflitos: [], riscos: ["Risco"], gatilho: "Aguardar", invalidacao: "Sem entrada", gerenciamento: "Não operar" };

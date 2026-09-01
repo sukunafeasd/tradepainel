@@ -53,6 +53,19 @@ test("candles fora de ordem, duplicadas ou insuficientes são rejeitadas", () =>
   assert.throws(() => validateCandles(duplicate, { interval: "1m" }), /ordem|duplicado/i);
 });
 
+test("maturidade exibida usa amostras do par/timeframe e preserva total global só como diagnóstico", () => {
+  const result = analyze(candles(1), {
+    symbol: "BTCUSDT",
+    interval: "15m",
+    calibration: { samples: 100, pairSamples: 0, applied: false, reliability: 0.5, groupWeights: {} },
+  });
+  assert.equal(result.calibration.samples, 0);
+  assert.equal(result.calibration.pairSamples, 0);
+  assert.equal(result.calibration.globalSamples, 100);
+  assert.equal(result.calibration.state, "aquecendo");
+  assert.equal(result.calibration.adjusted, false);
+});
+
 test("plano técnico mantém alvos no lado correto mesmo sem níveis úteis", () => {
   const levels = { supports: [], resistances: [] };
   const buy = buildRiskPlan({ signal: "COMPRA", price: 100, atrValue: 2, levels });

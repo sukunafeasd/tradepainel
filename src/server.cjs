@@ -19,8 +19,9 @@ const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; cha
 
 function createSseWriter(res, { maxQueue = 256 } = {}) {
   const coalescible = new Set(["snapshot", "market", "coins", "ping"]);
-  const queue = []; let blocked = false; let closed = false;
+  const queue = []; let blocked = false; let closed = false; let overflowed = false;
   const encode = (type, data) => type === "ping" ? ": ping\n\n" : `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+  const close = () => { closed = true; queue.length = 0; res.off?.("drain", flush); };
   const flush = () => {
     if (closed || res.destroyed) return;
     blocked = false;
@@ -39,11 +40,15 @@ function createSseWriter(res, { maxQueue = 256 } = {}) {
       if (expendable < 0) break;
       queue.splice(expendable, 1);
     }
+    if (queue.length > maxQueue) {
+      overflowed = true;
+      close();
+      if (typeof res.destroy === "function") res.destroy(); else res.end?.();
+    }
     return false;
   };
-  const close = () => { closed = true; queue.length = 0; res.off?.("drain", flush); };
   res.on("drain", flush);
-  return { send, close, diagnostics: () => ({ blocked, queued: queue.length, closed }) };
+  return { send, close, diagnostics: () => ({ blocked, queued: queue.length, closed, overflowed }) };
 }
 
 function createServer({ dataDirectory, uiDirectory, credentialStore, market = null, realtime = null, logger = console } = {}) {
@@ -60,12 +65,19 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   const ai = new AiReader(credentialStore, { now: () => clock.now() });
   const sseResponses = new Set();
   const rate = new Map();
+  const analysisAlertSchedule = new Map();
   let server;
   let settlementTimer = null;
   let alertMonitorTimer = null;
   let settlementRunning = false;
+  let shadowSettlementRunning = false;
   let alertMonitorRunning = false;
   let listening = false;
+
+  const ALERT_ANALYSIS_INTERVAL_MS = 15000;
+  const ALERT_ANALYSIS_RETRY_MS = 5000;
+  const ALERT_ANALYSIS_BATCH = 12;
+  const ALERT_ANALYSIS_CONCURRENCY = 4;
 
   const log = (level, event, details = {}) => { try { (logger[level] || logger.log).call(logger, JSON.stringify({ level, event, at: clock.now(), ...details })); } catch {} };
   const origin = () => `http://127.0.0.1:${server?.address()?.port || 0}`;
@@ -109,6 +121,19 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   };
 
   const cacheSet = (key, value) => { analysisCache.set(key, { expiresAtMono: performance.now() + 4000, value: structuredClone(value) }); while (analysisCache.size > 250) analysisCache.delete(analysisCache.keys().next().value); };
+  const setLatestAnalysis = (key, value) => {
+    if (latestFinalAnalysis.has(key)) latestFinalAnalysis.delete(key);
+    latestFinalAnalysis.set(key, { savedAtMono: performance.now(), value: structuredClone(value) });
+    while (latestFinalAnalysis.size > 250) latestFinalAnalysis.delete(latestFinalAnalysis.keys().next().value);
+    try { calibrator.observeSignal?.(value); }
+    catch (error) { log("warn", "shadow_calibration_observe_failed", { symbol: value?.symbol, interval: value?.interval, message: error.message }); }
+  };
+  const mapLimited = async (items, concurrency, worker) => {
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (cursor < items.length) { const index = cursor; cursor += 1; await worker(items[index], index); }
+    }));
+  };
   const getAnalysis = async (symbol, interval, { force = false, micro = null } = {}) => {
     const clean = cleanSymbol(symbol); const frame = cleanInterval(interval); const key = `${clean}|${frame}`; const cached = analysisCache.get(key);
     if (!force && cached && performance.now() < cached.expiresAtMono) return structuredClone(cached.value);
@@ -148,27 +173,67 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     } finally { settlementRunning = false; }
   }
 
+  async function settleShadowDue() {
+    if (!listening || shadowSettlementRunning || typeof calibrator.shadowDue !== "function") return [];
+    const due = calibrator.shadowDue(clock.now(), 50); if (!due.length) return [];
+    shadowSettlementRunning = true;
+    const resolutions = {};
+    try {
+      await mapLimited(due, 4, async (observation) => {
+        const realtimeDatum = live.datumAt?.(observation.symbol, observation.dueAt, 1500);
+        if (realtimeDatum) { resolutions[observation.id] = realtimeDatum; return; }
+        try { const historical = await marketClient.priceAt(observation.symbol, observation.dueAt, { toleranceMs: 1500 }); if (historical) resolutions[observation.id] = historical; }
+        catch (error) { log("warn", "shadow_calibration_price_unavailable", { observationId: observation.id, symbol: observation.symbol, interval: observation.interval, message: error.message }); }
+      });
+      const settled = calibrator.settleShadow(resolutions, clock.now());
+      if (settled.some((item) => item.status === "settled")) analysisCache.clear();
+      return settled;
+    } finally { shadowSettlementRunning = false; }
+  }
+
   async function monitorAnalysisAlerts() {
     if (!listening || alertMonitorRunning) return;
-    const targets = alerts.analysisTargets(); if (!targets.length) return;
+    const targets = alerts.analysisTargets();
+    const activeKeys = new Set(targets.map(({ symbol, interval }) => `${symbol}|${interval}`));
+    for (const key of analysisAlertSchedule.keys()) if (!activeKeys.has(key)) analysisAlertSchedule.delete(key);
+    if (!targets.length) return;
+    const nowMono = performance.now();
+    for (const target of targets) { const key = `${target.symbol}|${target.interval}`; if (!analysisAlertSchedule.has(key)) analysisAlertSchedule.set(key, { nextCheckAtMono: 0, failures: 0 }); }
+    const due = targets.filter((target) => Number(analysisAlertSchedule.get(`${target.symbol}|${target.interval}`)?.nextCheckAtMono || 0) <= nowMono).sort((left, right) => Number(analysisAlertSchedule.get(`${left.symbol}|${left.interval}`)?.nextCheckAtMono || 0) - Number(analysisAlertSchedule.get(`${right.symbol}|${right.interval}`)?.nextCheckAtMono || 0)).slice(0, ALERT_ANALYSIS_BATCH);
+    if (!due.length) return;
     alertMonitorRunning = true;
     try {
-      for (const { symbol, interval } of targets) {
+      await mapLimited(due, ALERT_ANALYSIS_CONCURRENCY, async ({ symbol, interval }) => {
+        const key = `${symbol}|${interval}`;
         try {
           const base = await getAnalysis(symbol, interval); const final = applyMtfGate(base, await getConfluence(symbol, interval));
-          latestFinalAnalysis.set(`${symbol}|${interval}`, { savedAtMono: performance.now(), value: structuredClone(final) });
+          setLatestAnalysis(key, final);
           alerts.checkAnalysis(final).forEach((alert) => live.publish?.("alert", alert));
-        } catch (error) { log("warn", "alert_monitor_failed", { symbol, interval, message: error.message }); }
-      }
+          analysisAlertSchedule.set(key, { nextCheckAtMono: performance.now() + ALERT_ANALYSIS_INTERVAL_MS, failures: 0 });
+        } catch (error) {
+          const failures = Number(analysisAlertSchedule.get(key)?.failures || 0) + 1;
+          analysisAlertSchedule.set(key, { nextCheckAtMono: performance.now() + Math.min(ALERT_ANALYSIS_INTERVAL_MS, ALERT_ANALYSIS_RETRY_MS * failures), failures });
+          log("warn", "alert_monitor_failed", { symbol, interval, failures, message: error.message });
+        }
+      });
     } finally { alertMonitorRunning = false; }
   }
 
+  const syncAlertPriceSubscriptions = () => live.watchPriceSymbols?.(alerts.priceSymbols());
+  const dispatchPriceAlerts = (datum) => {
+    const hits = alerts.checkPrice(datum);
+    hits.forEach((alert) => live.publish?.("alert", alert));
+    if (hits.length) syncAlertPriceSubscriptions();
+  };
   const onPrice = (datum) => {
     paper.updatePrices({ [datum.symbol]: datum }, clock.now());
+    dispatchPriceAlerts(datum);
   };
-  const onMarketPrice = (datum) => alerts.checkPrice(datum).forEach((alert) => live.publish?.("alert", alert));
+  const onMarketPrice = (datum) => dispatchPriceAlerts(datum);
+  const onAlertPrice = (datum) => dispatchPriceAlerts(datum);
   live.on?.("price", onPrice);
   live.on?.("market-price", onMarketPrice);
+  live.on?.("alert-price", onAlertPrice);
   live.on?.("warning", (error) => log("warn", "realtime_warning", { message: error.message }));
 
   async function api(req, res, url) {
@@ -181,7 +246,8 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (pathname === "/api/health/liveness" || pathname === "/api/health") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
       const snapshot = live.snapshot();
-      return json(res, 200, { ok: true, version: packageJson.version, uptimeSeconds: Math.round(process.uptime()), live: snapshot, market: marketClient.status(), ai: credentialStore.status(), calibration: calibrator.status(), memory: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) }, clock: clock.status(), persistence: { paper: paper.store.diagnostics(), alerts: alerts.store.diagnostics(), journal: journal.store.diagnostics() }, safety: { realOrders: false, publicMarketDataOnly: true } });
+      const paperDiagnostics = paper.store.diagnostics(); const archiveDiagnostics = paper.archive?.diagnostics?.() || { issues: [] };
+      return json(res, 200, { ok: true, version: packageJson.version, uptimeSeconds: Math.round(process.uptime()), live: snapshot, market: marketClient.status(), ai: credentialStore.status(), calibration: calibrator.status(), alertMonitor: { activeTargets: alerts.analysisTargets().length, scheduledTargets: analysisAlertSchedule.size, batchSize: ALERT_ANALYSIS_BATCH, concurrency: ALERT_ANALYSIS_CONCURRENCY }, memory: { rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024) }, clock: clock.status(), persistence: { paper: { ...paperDiagnostics, archive: archiveDiagnostics, issues: [...(paperDiagnostics.issues || []), ...(archiveDiagnostics.issues || [])] }, alerts: alerts.store.diagnostics(), journal: journal.store.diagnostics(), calibration: calibrator.store?.diagnostics?.() || { issues: [] } }, safety: { realOrders: false, publicMarketDataOnly: true } });
     }
     if (pathname === "/api/health/readiness") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
@@ -225,8 +291,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
       const symbol = cleanSymbol(match[1]); const interval = cleanInterval(url.searchParams.get("interval")); const force = url.searchParams.get("force") === "1";
       const base = await getAnalysis(symbol, interval, { force }); const mtf = await getConfluence(symbol, interval, force); const final = applyMtfGate(base, mtf);
-      latestFinalAnalysis.set(`${symbol}|${interval}`, { savedAtMono: performance.now(), value: structuredClone(final) });
-      while (latestFinalAnalysis.size > 250) latestFinalAnalysis.delete(latestFinalAnalysis.keys().next().value);
+      setLatestAnalysis(`${symbol}|${interval}`, final);
       alerts.checkAnalysis(final).forEach((alert) => live.publish?.("alert", alert)); return json(res, 200, final);
     }
     if ((match = pathname.match(/^\/api\/confluence\/([A-Za-z0-9]+)$/))) {
@@ -243,21 +308,22 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       let datum = priceDatums()[symbol];
       if (!datum) { const ticker = await marketClient.ticker(symbol, { force: true }); datum = ticker.datum; }
       const trade = paper.place({ ...input, symbol, interval, entryDatum: datum, entryPrice: undefined, analysisSnapshot: AdaptiveCalibrator.snapshot(reading), idempotencyKey: req.headers["idempotency-key"] || input.idempotencyKey, now: clock.now() });
+      await paper.flushPersistence?.();
       return json(res, 201, { trade, confirmedEntryPrice: trade.entryPrice, confirmedEntryPriceAt: trade.entryPriceAt, portfolio: paper.snapshot(priceDatums(), clock.now()) });
     }
-    if (pathname === "/api/paper/reset" && req.method === "POST") { const input = await body(req); if (input.confirm !== true) throw new AppError("Confirme a exclusão do histórico do simulador.", { status: 409, code: "CONFIRM_REQUIRED" }); return json(res, 200, paper.reset(10000)); }
-    if (pathname === "/api/paper/settings" && req.method === "POST") { paper.settings(await body(req)); return json(res, 200, paper.snapshot(priceDatums(), clock.now())); }
+    if (pathname === "/api/paper/reset" && req.method === "POST") { const input = await body(req); if (input.confirm !== true) throw new AppError("Confirme a exclusão do histórico do simulador.", { status: 409, code: "CONFIRM_REQUIRED" }); await paper.flushPersistence?.(); const snapshot = paper.reset(10000); await paper.flushPersistence?.(); return json(res, 200, snapshot); }
+    if (pathname === "/api/paper/settings" && req.method === "POST") { paper.settings(await body(req)); await paper.flushPersistence?.(); return json(res, 200, paper.snapshot(priceDatums(), clock.now())); }
     if (pathname === "/api/paper/export" && req.method === "GET") {
-      const rows = paper.store.value.results.slice().reverse(); const quote = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`; const header = ["abertura", "expiracao", "liquidacao", "par", "tempo", "direcao", "valor", "entrada", "saida", "resultado", "lucro", "nota", "sinal_painel", "confianca"];
+      const rows = (paper.allResults?.() || paper.store.value.results.slice()).reverse(); const history = paper.historyDetails?.() || { complete: true, unavailable: 0 }; const quote = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`; const header = ["abertura", "expiracao", "liquidacao", "par", "tempo", "direcao", "valor", "entrada", "saida", "resultado", "lucro", "nota", "sinal_painel", "confianca"];
       const lines = rows.map((trade) => [trade.openedAt, trade.expiresAt, trade.settledAt, trade.symbol, trade.interval, trade.direction, trade.stake, trade.entryPrice, trade.exitPrice, trade.result, trade.profit, trade.note, trade.analysisSnapshot?.signal, trade.analysisSnapshot?.confidence].map(quote).join(","));
-      return text(res, 200, `\uFEFF${header.join(",")}\n${lines.join("\n")}`, "text/csv; charset=utf-8", { "Content-Disposition": "attachment; filename=historico-dieftrade.csv" });
+      return text(res, 200, `\uFEFF${header.join(",")}\n${lines.join("\n")}`, "text/csv; charset=utf-8", { "Content-Disposition": "attachment; filename=historico-dieftrade.csv", "X-Dief-History-Complete": history.complete ? "1" : "0", "X-Dief-History-Unavailable": String(history.unavailable || 0) });
     }
     if (pathname === "/api/alerts" && req.method === "GET") return json(res, 200, alerts.list());
-    if (pathname === "/api/alerts" && req.method === "POST") { const input = await body(req); const symbol = cleanSymbol(input.symbol); if (marketClient.assertTradable) await marketClient.assertTradable(symbol); return json(res, 201, alerts.add({ ...input, symbol, interval: input.interval || live.interval, currentDatum: priceDatums()[symbol] })); }
-    if ((match = pathname.match(/^\/api\/alerts\/([a-f0-9]+)$/)) && req.method === "DELETE") { const removed = alerts.remove(match[1]); return removed ? json(res, 200, { ok: true, removed: true }) : fail(res, 404, "Alerta não encontrado.", "NOT_FOUND"); }
+    if (pathname === "/api/alerts" && req.method === "POST") { const input = await body(req); const symbol = cleanSymbol(input.symbol); if (marketClient.assertTradable) await marketClient.assertTradable(symbol); const created = alerts.add({ ...input, symbol, interval: input.interval || live.interval, currentDatum: priceDatums()[symbol] }); await alerts.flushPersistence(); syncAlertPriceSubscriptions(); void monitorAnalysisAlerts(); return json(res, 201, created); }
+    if ((match = pathname.match(/^\/api\/alerts\/([a-f0-9]+)$/)) && req.method === "DELETE") { const removed = alerts.remove(match[1]); if (removed) { await alerts.flushPersistence(); syncAlertPriceSubscriptions(); } return removed ? json(res, 200, { ok: true, removed: true }) : fail(res, 404, "Alerta não encontrado.", "NOT_FOUND"); }
     if (pathname === "/api/journal" && req.method === "GET") return json(res, 200, journal.page({ offset: Math.max(0, Number(url.searchParams.get("offset")) || 0), limit: cleanLimit(url.searchParams.get("limit"), 25, 100), query: url.searchParams.get("q") || "" }));
-    if (pathname === "/api/journal" && req.method === "POST") { const input = await body(req); const symbol = cleanSymbol(input.symbol); if (marketClient.assertTradable) await marketClient.assertTradable(symbol); return json(res, 201, journal.add({ ...input, symbol })); }
-    if ((match = pathname.match(/^\/api\/journal\/([a-f0-9]+)$/)) && req.method === "DELETE") { const removed = journal.remove(match[1]); return removed ? json(res, 200, { ok: true, removed: true }) : fail(res, 404, "Anotação não encontrada.", "NOT_FOUND"); }
+    if (pathname === "/api/journal" && req.method === "POST") { const input = await body(req); const symbol = cleanSymbol(input.symbol); if (marketClient.assertTradable) await marketClient.assertTradable(symbol); const created = journal.add({ ...input, symbol }); await journal.flushPersistence(); return json(res, 201, created); }
+    if ((match = pathname.match(/^\/api\/journal\/([a-f0-9]+)$/)) && req.method === "DELETE") { const removed = journal.remove(match[1]); if (removed) await journal.flushPersistence(); return removed ? json(res, 200, { ok: true, removed: true }) : fail(res, 404, "Anotação não encontrada.", "NOT_FOUND"); }
     if (pathname === "/api/ai/config" && req.method === "GET") return json(res, 200, credentialStore.status());
     if (pathname === "/api/ai/config" && req.method === "POST") {
       const input = await body(req); const temporary = { load: () => ({ apiKey: String(input.apiKey || "").trim(), provider: input.provider, model: input.model }), status: () => ({ stored: true, operational: true }) };
@@ -268,11 +334,11 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (pathname === "/api/ai/read" && req.method === "POST") {
       const input = await body(req); const symbol = cleanSymbol(input.symbol || live.symbol); const interval = cleanInterval(input.interval || live.interval); const key = `${symbol}|${interval}`; const recent = latestFinalAnalysis.get(key);
       let analysis = recent && performance.now() - recent.savedAtMono <= 30000 ? structuredClone(recent.value) : null;
-      if (!analysis) { const base = await getAnalysis(symbol, interval); analysis = applyMtfGate(base, await getConfluence(symbol, interval)); latestFinalAnalysis.set(key, { savedAtMono: performance.now(), value: structuredClone(analysis) }); }
+      if (!analysis) { const base = await getAnalysis(symbol, interval); analysis = applyMtfGate(base, await getConfluence(symbol, interval)); setLatestAnalysis(key, analysis); }
       return json(res, 200, await ai.read(analysis));
     }
     if (pathname === "/api/calibration" && req.method === "GET") return json(res, 200, calibrator.status());
-    if (pathname === "/api/calibration/reset" && req.method === "POST") { const input = await body(req); if (input.confirm !== true) throw new AppError("Confirme a limpeza da calibração.", { status: 409, code: "CONFIRM_REQUIRED" }); analysisCache.clear(); return json(res, 200, calibrator.reset()); }
+    if (pathname === "/api/calibration/reset" && req.method === "POST") { const input = await body(req); if (input.confirm !== true) throw new AppError("Confirme a limpeza da calibração.", { status: 409, code: "CONFIRM_REQUIRED" }); analysisCache.clear(); await calibrator.flushPersistence?.(); const status = calibrator.reset(); await calibrator.flushPersistence?.(); return json(res, 200, status); }
     return fail(res, 404, "Rota não encontrada.", "NOT_FOUND");
   }
 
@@ -299,21 +365,23 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   });
 
   return {
-    token, live, market: marketClient, clock, paper, alerts, journal,
+    token, live, market: marketClient, clock, paper, alerts, journal, calibrator,
     listen(port = 0) {
       return new Promise((resolve, reject) => {
         server.once("error", reject);
         server.listen(port, "127.0.0.1", async () => {
           server.removeListener("error", reject); listening = true;
           try { await marketClient.syncClock?.(); } catch (error) { log("warn", "clock_sync_failed", { message: error.message }); }
-          live.start(); settlementTimer = setInterval(() => { paper.updatePrices(priceDatums(), clock.now()); void settleDue(); }, 1000); settlementTimer.unref?.(); alertMonitorTimer = setInterval(() => void monitorAnalysisAlerts(), 15000); alertMonitorTimer.unref?.(); void settleDue(); void monitorAnalysisAlerts(); resolve({ port: server.address().port, token });
+          live.start(); syncAlertPriceSubscriptions(); settlementTimer = setInterval(() => { paper.updatePrices(priceDatums(), clock.now()); void settleDue(); void settleShadowDue(); }, 1000); settlementTimer.unref?.(); alertMonitorTimer = setInterval(() => void monitorAnalysisAlerts(), 2500); alertMonitorTimer.unref?.(); void settleDue(); void settleShadowDue(); void monitorAnalysisAlerts(); resolve({ port: server.address().port, token });
         });
       });
     },
     async close() {
       listening = false; if (settlementTimer) clearInterval(settlementTimer); if (alertMonitorTimer) clearInterval(alertMonitorTimer); settlementTimer = null; alertMonitorTimer = null;
-      live.off?.("price", onPrice); live.off?.("market-price", onMarketPrice); live.close(); marketClient.close?.();
+      live.off?.("price", onPrice); live.off?.("market-price", onMarketPrice); live.off?.("alert-price", onAlertPrice); live.close(); marketClient.close?.();
       for (const entry of sseResponses) { clearInterval(entry.keepAlive); entry.remove(); entry.writer?.close(); try { entry.res.end(); } catch {} } sseResponses.clear();
+      const persistenceFlushes = await Promise.allSettled([paper.flushPersistence?.(), alerts.flushPersistence?.(), journal.flushPersistence?.(), calibrator.flushPersistence?.()]);
+      persistenceFlushes.filter((item) => item.status === "rejected").forEach((item) => log("error", "persistence_flush_failed", { message: item.reason?.message || "Falha ao esvaziar fila" }));
       if (!server.listening) return;
       await new Promise((resolve) => {
         const force = setTimeout(() => { server.closeAllConnections?.(); resolve(); }, 1500);

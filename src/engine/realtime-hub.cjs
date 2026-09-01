@@ -26,16 +26,21 @@ class RealtimeHub extends EventEmitter {
     this.marketHostIndex = 0;
     this.socket = null;
     this.marketSocket = null;
+    this.alertSocket = null;
     this.symbol = "BTCUSDT";
     this.interval = "15m";
     this.symbolGeneration = 0;
     this.marketGeneration = 0;
+    this.alertGeneration = 0;
     this.symbolReconnectTimer = null;
     this.marketReconnectTimer = null;
+    this.alertReconnectTimer = null;
     this.retry = 0;
     this.closed = true;
     this.state = this.#blankState();
     this.market = new Map();
+    this.alertSymbols = new Set();
+    this.alertTradeIds = new Map();
     this.priceHistory = new Map();
     this.flowQueue = [];
     this.flowTotals = { buy: 0, sell: 0, buyQuote: 0, sellQuote: 0 };
@@ -46,7 +51,7 @@ class RealtimeHub extends EventEmitter {
     this.symbolOpenedMono = 0;
     this.lastSymbolEventMono = 0;
     this.clients = new Set();
-    this.metrics = { reconnects: 0, marketReconnects: 0, connectedAt: null, lastDisconnectAt: null, lastError: null, symbolHost: null, marketHost: null, malformedEvents: 0, rejectedTimestamps: 0, duplicateTrades: 0, generation: 0 };
+    this.metrics = { reconnects: 0, marketReconnects: 0, alertReconnects: 0, alertStreams: 0, connectedAt: null, lastDisconnectAt: null, lastError: null, symbolHost: null, marketHost: null, alertHost: null, malformedEvents: 0, rejectedTimestamps: 0, duplicateTrades: 0, generation: 0 };
     this.flushTimer = null;
     this.staleTimer = null;
   }
@@ -88,6 +93,23 @@ class RealtimeHub extends EventEmitter {
     try { old?.close(1000, "troca de mercado"); } catch {}
     if (!this.closed) this.#connectSymbol(this.symbolGeneration);
     this.publish("market-reset", { symbol: clean, interval: frame, generation: this.symbolGeneration });
+    return true;
+  }
+
+  watchPriceSymbols(symbols = []) {
+    const next = [...new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => cleanSymbol(symbol)))].sort();
+    const current = [...this.alertSymbols].sort();
+    if (next.length === current.length && next.every((symbol, index) => symbol === current[index])) return false;
+    this.alertSymbols = new Set(next);
+    this.metrics.alertStreams = next.length;
+    this.alertTradeIds.clear();
+    this.alertGeneration += 1;
+    clearTimeout(this.alertReconnectTimer);
+    this.alertReconnectTimer = null;
+    const old = this.alertSocket;
+    this.alertSocket = null;
+    try { old?.close(1000, "alertas atualizados"); } catch {}
+    if (!this.closed && next.length) this.#connectAlertPrices(this.alertGeneration);
     return true;
   }
 
@@ -197,6 +219,39 @@ class RealtimeHub extends EventEmitter {
     this.state.freshness[component] = { exchangeTimestamp, receivedAt, receivedMono, ageMs: 0, stale: false };
     this.state.lastEventAt = Math.max(this.state.lastEventAt, receivedAt);
     this.state.connected = true;
+  }
+
+  #connectAlertPrices(generation) {
+    if (this.closed || generation !== this.alertGeneration || !this.alertSymbols.size || this.#socketReady(this.alertSocket)) return;
+    const host = this.streamHosts[generation % this.streamHosts.length];
+    const socket = new this.WebSocketImpl(`${host}/ws`, { handshakeTimeout: 10000 });
+    this.alertSocket = socket;
+    socket.on("open", () => {
+      if (generation !== this.alertGeneration || socket !== this.alertSocket) return;
+      this.metrics.alertHost = host;
+      try { socket.send(JSON.stringify({ method: "SUBSCRIBE", params: [...this.alertSymbols].map((symbol) => `${symbol.toLowerCase()}@aggTrade`), id: generation })); }
+      catch (error) { this.emit("warning", error); try { socket.terminate(); } catch {} }
+    });
+    socket.on("message", (raw) => {
+      if (generation !== this.alertGeneration || socket !== this.alertSocket || this.closed) return;
+      try {
+        const data = JSON.parse(raw.toString());
+        if (data?.result === null || data?.e !== "aggTrade") return;
+        const symbol = String(data.s || "").toUpperCase();
+        if (!this.alertSymbols.has(symbol)) return;
+        const receivedAt = this.clock.now(); const price = finitePositive(data.p); const exchangeTimestamp = Number(data.T); const tradeId = String(data.a ?? "");
+        if (!price || !tradeId || !this.#validEventTimestamp(exchangeTimestamp, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
+        if (this.alertTradeIds.get(symbol) === tradeId) return;
+        this.alertTradeIds.set(symbol, tradeId);
+        this.emit("alert-price", { symbol, value: price, exchangeTimestamp, receivedAt, source: "binance-alert-aggtrade", stale: false, tradeId });
+      } catch (error) { this.metrics.malformedEvents += 1; this.emit("warning", error); }
+    });
+    socket.on("close", () => {
+      if (generation !== this.alertGeneration || socket !== this.alertSocket) return;
+      this.alertSocket = null; this.metrics.alertReconnects += 1;
+      if (!this.closed && this.alertSymbols.size) this.alertReconnectTimer = setTimeout(() => this.#connectAlertPrices(generation), 1500 + Math.random() * 500);
+    });
+    socket.on("error", (error) => { this.metrics.lastError = error?.message || "Falha no fluxo de alertas"; try { socket.terminate(); } catch {} });
   }
 
   #validEventTimestamp(exchangeTimestamp, receivedAt) {
@@ -312,13 +367,13 @@ class RealtimeHub extends EventEmitter {
 
   close() {
     this.closed = true;
-    this.symbolGeneration += 1; this.marketGeneration += 1;
-    clearTimeout(this.symbolReconnectTimer); clearTimeout(this.marketReconnectTimer);
-    this.symbolReconnectTimer = null; this.marketReconnectTimer = null;
+    this.symbolGeneration += 1; this.marketGeneration += 1; this.alertGeneration += 1;
+    clearTimeout(this.symbolReconnectTimer); clearTimeout(this.marketReconnectTimer); clearTimeout(this.alertReconnectTimer);
+    this.symbolReconnectTimer = null; this.marketReconnectTimer = null; this.alertReconnectTimer = null;
     if (this.flushTimer) clearInterval(this.flushTimer); if (this.staleTimer) clearInterval(this.staleTimer);
     this.flushTimer = null; this.staleTimer = null;
-    for (const socket of [this.socket, this.marketSocket]) { try { socket?.close(1000, "encerrando"); } catch {} }
-    this.socket = null; this.marketSocket = null;
+    for (const socket of [this.socket, this.marketSocket, this.alertSocket]) { try { socket?.close(1000, "encerrando"); } catch {} }
+    this.socket = null; this.marketSocket = null; this.alertSocket = null;
     this.clients.clear();
   }
 }

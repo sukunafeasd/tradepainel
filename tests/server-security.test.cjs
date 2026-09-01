@@ -62,9 +62,37 @@ test("fronteira HTTP rejeita origem, token em query, método e payload anômalo"
 });
 
 test("SSE preserva eventos críticos durante backpressure e consolida snapshots", () => {
-  class FakeResponse extends EventEmitter { constructor(){super();this.destroyed=false;this.chunks=[];this.first=true;} write(chunk){this.chunks.push(chunk);if(this.first){this.first=false;return false;}return true;} }
+  class FakeResponse extends EventEmitter { constructor(){super();this.chunks=[];this.first=true;} write(chunk){this.chunks.push(chunk);if(this.first){this.first=false;return false;}return true;} destroy(){this.destroyed=true;} }
   const res=new FakeResponse(),writer=createSseWriter(res,{maxQueue:4});
   writer.send("ready",{});writer.send("snapshot",{n:1});writer.send("snapshot",{n:2});writer.send("alert",{id:"a"});writer.send("paper-result",{id:"p"});
   assert.equal(writer.diagnostics().blocked,true);res.emit("drain");const output=res.chunks.join("");
   assert.doesNotMatch(output,/"n":1[^]*"n":2/);assert.match(output,/"n":2/);assert.match(output,/event: alert/);assert.match(output,/event: paper-result/);writer.close();
+});
+
+test("SSE encerra cliente travado quando a fila crítica atinge o limite real", () => {
+  class FakeResponse extends EventEmitter { constructor(){super();this.chunks=[];} write(chunk){this.chunks.push(chunk);return false;} destroy(){this.destroyed=true;} }
+  const res=new FakeResponse(),writer=createSseWriter(res,{maxQueue:3});
+  writer.send("ready",{});writer.send("alert",{id:1});writer.send("paper-result",{id:2});writer.send("alert",{id:3});writer.send("paper-result",{id:4});
+  assert.equal(writer.diagnostics().overflowed,true);assert.equal(writer.diagnostics().closed,true);assert.equal(writer.diagnostics().queued,0);assert.equal(res.destroyed,true);
+});
+
+test("exportação HTTP usa o arquivo histórico completo além da retenção visível", async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"dieftrade-server-export-"));const ui=path.join(dir,"ui");fs.mkdirSync(ui);fs.writeFileSync(path.join(ui,"index.html"),"ok");
+  const market={status:()=>({ok:true}),topPairs:async()=>[],klines:async()=>[],ticker:async()=>({last:100})};
+  const app=createServer({dataDirectory:dir,uiDirectory:ui,credentialStore:credentials,market,realtime:new FakeLive()});app.paper.retention=2;let now=Date.now()-300000;
+  try {
+    for(let index=0;index<5;index+=1){const entry=100+index,trade=app.paper.place({symbol:"BTCUSDT",direction:"up",stake:10,durationMs:30000,interval:"1m",entryDatum:{symbol:"BTCUSDT",value:entry,exchangeTimestamp:now,receivedAt:now,source:"test",stale:false},now});app.paper.settleResolved({[trade.id]:{symbol:"BTCUSDT",value:entry+1,exchangeTimestamp:now+30000,receivedAt:now+30000,source:"test",stale:false}},now+30000);now+=31000;}
+    await app.paper.flushPersistence();assert.equal(app.paper.store.value.results.length,2);
+    const {port,token}=await app.listen();const response=await fetch(`http://127.0.0.1:${port}/api/paper/export`,{headers:{"X-Dief-Token":token}});assert.equal(response.status,200);assert.equal(response.headers.get("x-dief-history-complete"),"1");const csv=await response.text();assert.equal(csv.trim().split(/\r?\n/).length,6);
+  } finally {await app.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test("análise final alimenta calibração sombra sem depender de operação do usuário", async () => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),"dieftrade-server-shadow-"));const ui=path.join(dir,"ui");fs.mkdirSync(ui);fs.writeFileSync(path.join(ui,"index.html"),"ok");
+  const widths={"1m":60000,"5m":300000,"15m":900000,"1h":3600000,"4h":14400000,"1d":86400000};
+  const trend=(interval)=>{const step=widths[interval]||60000,end=Date.now()-step;return Array.from({length:500},(_,index)=>{const base=100+index*.08+Math.sin(index/8)*1.2,open=base-.07,close=base+.07,t=end-(499-index)*step;return{t,closeTime:t+step-1,open,high:Math.max(open,close)+.35,low:Math.min(open,close)-.35,close,volume:1000+index*2,quoteVolume:(1000+index*2)*close};});};
+  const market={status:()=>({ok:true}),topPairs:async()=>[],klines:async(_symbol,interval)=>trend(interval),assertTradable:async()=>true};
+  const app=createServer({dataDirectory:dir,uiDirectory:ui,credentialStore:credentials,market,realtime:new FakeLive()});
+  try {const {port,token}=await app.listen();const response=await fetch(`http://127.0.0.1:${port}/api/analysis/BTCUSDT?interval=1m`,{headers:{"X-Dief-Token":token}});assert.equal(response.status,200);const analysis=await response.json();assert.ok(["COMPRA","VENDA"].includes(analysis.signal));assert.equal(app.calibrator.status().shadow.pending,1);await app.calibrator.flushPersistence();}
+  finally {await app.close();fs.rmSync(dir,{recursive:true,force:true});}
 });

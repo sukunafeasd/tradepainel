@@ -302,7 +302,21 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
     confidenceMeaning: "qualidade das evidências alinhadas, não probabilidade garantida de lucro", regime: structure.regime, structure, candle,
     reasons: reasons.sort((a, b) => Math.abs(b.points) - Math.abs(a.points)), warnings,
     dataQuality: { score: dataQualityScore, freshness: freshnessScore, liquidity: liquidityScore, completeness: completenessScore, lastCandleClosed: true, ageMs, conflictingGroups, samples: calc.length, gaps: validation.gaps },
-    calibration: calibration ? { samples: calibration.samples || 0, reliability: Number(calibration.reliability || 0.5), state: (calibration.samples || 0) < 12 ? "aquecendo" : (calibration.samples || 0) < 60 ? "calibrando" : "maduro", adjusted: (calibration.samples || 0) >= 12 } : { samples: 0, reliability: 0.5, state: "aquecendo", adjusted: false },
+    calibration: calibration ? (() => {
+      const pairSamples = Math.max(0, Number(calibration.pairSamples) || 0);
+      const applied = calibration.applied === true;
+      return {
+        // `samples` remains for backwards-compatible renderers, but now always
+        // means samples for this exact symbol+timeframe (never the global total).
+        samples: pairSamples,
+        pairSamples,
+        globalSamples: Math.max(0, Number(calibration.samples) || 0),
+        reliability: Number(calibration.reliability || 0.5),
+        state: pairSamples < 12 ? "aquecendo" : pairSamples < 60 ? "calibrando" : "maduro",
+        adjusted: applied,
+        applied,
+      };
+    })() : { samples: 0, pairSamples: 0, globalSamples: 0, reliability: 0.5, state: "aquecendo", adjusted: false, applied: false },
     indicators: { ema9: priceRound(at(ema9)), ema20: priceRound(at(ema20)), ema50: priceRound(at(ema50)), ema200: priceRound(at(ema200)), rsi: I.round(rsiValue, 2), macd: priceRound(at(macd.line)), macdSignal: priceRound(at(macd.signal)), macdHistogram: priceRound(hist), bollingerUpper: priceRound(at(bb.upper)), bollingerMiddle: priceRound(at(bb.middle)), bollingerLower: priceRound(at(bb.lower)), bollingerPercentB: I.round(at(bb.percentB), 3), bandwidth: I.round(at(bb.bandwidth), 4), atr: priceRound(atrValue), atrPct: I.round(volatilityPct, 3), vwap: vwapAllowed ? priceRound(vwapValue) : null, adx: I.round(adxValue, 2), stochasticK: I.round(at(stochastic.k), 2), stochasticD: I.round(at(stochastic.d), 2), obvSlope: I.round(obvSlope, 2), roc: I.round(at(roc), 3), volumeRatio: I.round(volumeRatio, 2) },
     levels: { supports: levels.supports.map((level) => ({ price: priceRound(level.price), touches: level.touches, supportTouches: level.supportTouches, resistanceTouches: level.resistanceTouches, strength: level.strength, role: level.role, distancePct: I.round(level.distancePct, 3) })), resistances: levels.resistances.map((level) => ({ price: priceRound(level.price), touches: level.touches, supportTouches: level.supportTouches, resistanceTouches: level.resistanceTouches, strength: level.strength, role: level.role, distancePct: I.round(level.distancePct, 3) })), atPrice: levels.atPrice, volumeProfile: profile },
     micro: { used: useMicro, stale: micro.stale !== false, spreadPct: Number.isFinite(usableSpreadPct) ? I.round(usableSpreadPct, 4) : null, bookImbalance: useMicro ? I.round(micro.bookImbalance, 4) : null, buyRatio: useMicro ? I.round(micro.buyRatio, 4) : null, delta: useMicro ? I.round(micro.delta, 4) : null, deltaQuote: useMicro ? I.round(micro.deltaQuote, 2) : null },

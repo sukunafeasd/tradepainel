@@ -148,8 +148,19 @@ class AiReader {
 
   async diagnose({ signal } = {}) {
     const { apiKey, provider = "gemini", model } = this.credentials.load(); if (!apiKey) throw new AppError("Configure uma chave de IA antes do diagnóstico.", { status: 409, code: "AI_NOT_CONFIGURED" }); const started = performance.now();
-    if (provider === "gemini") { const response = await this.#request(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || "gemini-2.5-flash")}`, { headers: { "x-goog-api-key": apiKey }, signal }, { provider, model }, { attempts: 1, timeoutMs: 12000 }); let data; try { data = await response.json(); } catch (error) { throw new AppError("O Gemini retornou JSON inválido no diagnóstico.", { status: 502, code: "AI_MALFORMED_HTTP", cause: error }); } return { ok: true, provider, model: String(data.name || model).replace(/^models\//, ""), displayName: data.displayName || model, latencyMs: Math.round(performance.now() - started), supportsGenerateContent: (data.supportedGenerationMethods || []).includes("generateContent") }; }
-    const response = await this.#request("https://api.openai.com/v1/models", { headers: { Authorization: `Bearer ${apiKey}` }, signal }, { provider, model }, { attempts: 1, timeoutMs: 12000 }); return { ok: true, provider, model, latencyMs: Math.round(performance.now() - started), supportsGenerateContent: true };
+    if (provider === "gemini") {
+      const requestedModel = model || "gemini-2.5-flash";
+      const response = await this.#request(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requestedModel)}`, { headers: { "x-goog-api-key": apiKey }, signal }, { provider, model: requestedModel }, { attempts: 1, timeoutMs: 12000 });
+      let data; try { data = await response.json(); } catch (error) { throw new AppError("O Gemini retornou JSON inválido no diagnóstico.", { status: 502, code: "AI_MALFORMED_HTTP", cause: error }); }
+      const resolvedModel = String(data.name || requestedModel).replace(/^models\//, ""); const supportsGenerateContent = (data.supportedGenerationMethods || []).includes("generateContent");
+      if (resolvedModel !== requestedModel || !supportsGenerateContent) throw new AppError(`O modelo ${requestedModel} existe, mas não está liberado para gerar conteúdo neste projeto.`, { status: 409, code: "AI_MODEL_UNSUPPORTED" });
+      return { ok: true, provider, model: resolvedModel, displayName: data.displayName || requestedModel, latencyMs: Math.round(performance.now() - started), supportsGenerateContent };
+    }
+    const requestedModel = model || "gpt-5";
+    const response = await this.#request(`https://api.openai.com/v1/models/${encodeURIComponent(requestedModel)}`, { headers: { Authorization: `Bearer ${apiKey}` }, signal }, { provider, model: requestedModel }, { attempts: 1, timeoutMs: 12000 });
+    let data; try { data = await response.json(); } catch (error) { throw new AppError("A OpenAI retornou JSON inválido no diagnóstico.", { status: 502, code: "AI_MALFORMED_HTTP", cause: error }); }
+    if (String(data.id || "") !== requestedModel) throw new AppError(`A chave não confirmou acesso ao modelo ${requestedModel}.`, { status: 409, code: "AI_MODEL_MISMATCH" });
+    return { ok: true, provider, model: requestedModel, displayName: data.id, latencyMs: Math.round(performance.now() - started), supportsGenerateContent: true };
   }
 }
 

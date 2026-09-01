@@ -35,13 +35,13 @@ class AlertsStore {
     if (!kinds.includes(kind)) throw new AppError("Tipo de alerta inválido.", { code: "INVALID_ALERT_KIND" });
     const clean = cleanSymbol(symbol); const frame = ["price_gte", "price_lte"].includes(kind) ? null : cleanInterval(interval); const numericValue = value == null || value === "" ? null : finiteNumber(value, "Valor do alerta");
     if (["price_gte", "price_lte"].includes(kind) && !(numericValue > 0)) throw new AppError("Preço-alvo inválido.", { code: "INVALID_ALERT_VALUE" });
-    if (kind === "confidence_gte" && !(numericValue >= 0 && numericValue <= 100)) throw new AppError("A confiança precisa ficar entre 0% e 100%.", { code: "INVALID_ALERT_VALUE" });
+    if (kind === "confidence_gte" && !(numericValue >= 0 && numericValue <= 100)) throw new AppError("A qualidade do sinal ativo precisa ficar entre 0% e 100%.", { code: "INVALID_ALERT_VALUE" });
     if (this.store.value.length >= this.maxAlerts) throw new AppError(`Limite de ${this.maxAlerts} alertas atingido. Exclua ou arquive alertas antigos.`, { status: 409, code: "ALERT_LIMIT" });
     const now = this.now(); const datum = validateMarketDatum(currentDatum, { symbol: clean, maxAgeMs: 5000, now });
     const alert = { id: id(), symbol: clean, interval: frame, kind, value: numericValue, note: String(note).slice(0, 300), mode: mode === "condition" ? "condition" : "cross", active: true, triggeredAt: null, hitPrice: null, createdAt: now, lastObservedPrice: datum && !datum.stale ? datum.value : null, lastObservedAt: datum && !datum.stale ? datum.exchangeTimestamp : null, lastBaselinePersistedAt: now };
-    this.store.value.push(alert); this.store.save(); return alert;
+    this.store.value.push(alert); this.store.saveQueued(); return alert;
   }
-  remove(alertId) { const before = this.store.value.length; this.store.value = this.store.value.filter((alert) => alert.id !== alertId); const removed = before !== this.store.value.length; if (removed) this.store.save(); return removed; }
+  remove(alertId) { const before = this.store.value.length; this.store.value = this.store.value.filter((alert) => alert.id !== alertId); const removed = before !== this.store.value.length; if (removed) this.store.saveQueued(); return removed; }
   checkPrice(datum) {
     const valid = validateMarketDatum(datum, { symbol: datum?.symbol, maxAgeMs: 5000, now: this.now() });
     if (!valid || valid.stale) return [];
@@ -55,7 +55,7 @@ class AlertsStore {
       if (!Number.isFinite(previous) || now - Number(alert.lastBaselinePersistedAt || 0) >= 15000) { alert.lastBaselinePersistedAt = now; baselineChanged = true; }
       if ((alert.mode === "condition" && condition) || (alert.mode !== "condition" && crossed)) { alert.active = false; alert.triggeredAt = now; alert.hitPrice = valid.value; alert.hitPriceAt = valid.exchangeTimestamp; hits.push(structuredClone(alert)); }
     }
-    if (hits.length || baselineChanged) this.store.save();
+    if (hits.length || baselineChanged) this.store.saveQueued();
     return hits;
   }
   check(datums) { return Object.values(datums || {}).flatMap((datum) => this.checkPrice(datum)); }
@@ -67,17 +67,23 @@ class AlertsStore {
       const hit = alert.kind === "signal_buy" ? analysis.signal === "COMPRA" : alert.kind === "signal_sell" ? analysis.signal === "VENDA" : alert.kind === "confidence_gte" ? Number(analysis.confidence) >= Number(alert.value) && analysis.signal !== "AGUARDE" : false;
       if (hit) { alert.active = false; alert.triggeredAt = this.now(); alert.hitPrice = analysis.price; alert.hitSignal = analysis.signal; alert.hitConfidence = analysis.confidence; alert.analysisId = analysis.id; hits.push(structuredClone(alert)); }
     }
-    if (hits.length) this.store.save(); return hits;
+    if (hits.length) this.store.saveQueued(); return hits;
   }
-  analysisTargets(limit = 25) {
+  priceSymbols() {
+    return [...new Set(this.store.value.filter((alert) => alert.active && ["price_gte", "price_lte"].includes(alert.kind)).map((alert) => alert.symbol))];
+  }
+  analysisTargets(options = {}) {
+    const normalized = typeof options === "number" ? { limit: options } : options || {};
+    const limit = normalized.limit == null ? Infinity : Math.max(0, Number(normalized.limit) || 0);
+    const offset = Math.max(0, Number(normalized.offset) || 0);
     const unique = new Map();
     for (const alert of this.store.value) {
       if (!alert.active || !["signal_buy", "signal_sell", "confidence_gte"].includes(alert.kind)) continue;
       unique.set(`${alert.symbol}|${alert.interval}`, { symbol: alert.symbol, interval: alert.interval });
-      if (unique.size >= limit) break;
     }
-    return [...unique.values()];
+    return [...unique.values()].slice(offset, Number.isFinite(limit) ? offset + limit : undefined);
   }
+  async flushPersistence() { await this.store.flush(); }
 }
 
 class JournalStore {
@@ -87,9 +93,10 @@ class JournalStore {
   add(entry) {
     if (this.store.value.length >= this.maxEntries) throw new AppError(`Limite de ${this.maxEntries} anotações atingido. Exporte o diário antes de continuar.`, { status: 409, code: "JOURNAL_LIMIT" });
     const record = { id: id(), createdAt: this.now(), symbol: cleanSymbol(entry.symbol), interval: cleanInterval(entry.interval || "15m"), side: ["buy", "sell", "observe"].includes(entry.side) ? entry.side : "observe", setup: String(entry.setup || "").slice(0, 120), entry: entry.entry == null || entry.entry === "" ? null : finiteNumber(entry.entry, "Entrada", { min: Number.MIN_VALUE }), stop: entry.stop == null || entry.stop === "" ? null : finiteNumber(entry.stop, "Stop", { min: Number.MIN_VALUE }), target: entry.target == null || entry.target === "" ? null : finiteNumber(entry.target, "Alvo", { min: Number.MIN_VALUE }), result: String(entry.result || "aberto").slice(0, 40), note: String(entry.note || "").slice(0, 2000), screenshot: null };
-    this.store.value.push(record); this.store.save(); return record;
+    this.store.value.push(record); this.store.saveQueued(); return record;
   }
-  remove(entryId) { const before = this.store.value.length; this.store.value = this.store.value.filter((entry) => entry.id !== entryId); const removed = before !== this.store.value.length; if (removed) this.store.save(); return removed; }
+  remove(entryId) { const before = this.store.value.length; this.store.value = this.store.value.filter((entry) => entry.id !== entryId); const removed = before !== this.store.value.length; if (removed) this.store.saveQueued(); return removed; }
+  async flushPersistence() { await this.store.flush(); }
 }
 
 module.exports = { AlertsStore, JournalStore, validAlertArray, validJournalArray, migrateAlerts, migrateJournal };

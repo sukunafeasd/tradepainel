@@ -22,7 +22,7 @@ Assistente desktop de leitura de mercado e **paper trading** para day trade de c
 ## Princípios
 
 - sinais são leitura técnica, não promessa de lucro;
-- “confiança” mede a qualidade da confluência, não uma probabilidade garantida;
+- “confiança”, exibida como **qualidade da leitura**, mede a força e a consistência das evidências dentro do timeframe analisado; o alinhamento multi-timeframe é uma medida separada e nenhum dos dois números representa probabilidade de acerto, lucro ou resultado futuro;
 - o programa não possui chave de corretora e não envia ordens reais;
 - a chave opcional do Gemini/OpenAI é criptografada pelo Windows e nunca volta à interface;
 - a chave nunca deve ser colocada no código, GitHub ou conversa;
@@ -41,6 +41,21 @@ pnpm build
 ```
 
 O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
+
+## Versão 0.8.0
+
+- Alertas técnicos deixam de ter corte oculto após o 25º alvo: todos os pares/timeframes ativos entram no agendamento, processado em lotes com concorrência limitada e retentativa individual.
+- Cruzamentos de preço usam negócios `aggTrade` dedicados para todos os símbolos monitorados, reduzindo a chance de um movimento rápido desaparecer entre atualizações do radar.
+- A calibração manual aceita somente operações entre `0,8x` e `1,25x` do horizonte do timeframe. Em paralelo, a calibração sombra observa automaticamente, uma vez por vela fechada, sinais direcionais válidos e os avalia no horizonte exato; assim, timeframes como 1h, 4h e 1d podem amadurecer sem depender de uma duração disponível no simulador.
+- Maturidade e pesos adaptativos continuam isolados por par/timeframe. A interface mostra a amostra desse par/timeframe, enquanto o total global fica apenas como diagnóstico.
+- Cotações REST autoritativas passam a carregar o timestamp real do último negócio da exchange. A busca da cotação de vencimento pagina janelas com mais de 1.000 `aggTrades` e nunca aceita negócio posterior à expiração.
+- Schemas do simulador e da calibração agora validam profundamente registros e invariantes. Gravações JSON rotineiras usam uma fila assíncrona ordenada, com arquivo temporário, `fsync`, backup e renomeação atômica.
+- Recuperações de backup, quarentenas e reinicializações por corrupção aparecem no painel de Saúde e geram aviso local. As leituras de inicialização e o arquivo durável de resultados podem continuar síncronos por segurança; a fila assíncrona se aplica às gravações JSON de rotina.
+- Resultados detalhados passam a ser anexados, com `fsync`, a um arquivo histórico completo antes da retenção da lista visível. A exportação CSV usa esse arquivo e informa quando está completa. Registros que já haviam sido descartados antes da v0.8 não podem ser reconstruídos e são sinalizados como indisponíveis.
+- O diagnóstico de IA confirma o modelo exato na OpenAI e, no Gemini, confirma tanto o modelo quanto o suporte a `generateContent` antes de considerar a configuração operacional.
+- A fila SSE continua consolidando snapshots substituíveis, mas agora possui limite rígido também para eventos críticos: um cliente travado é encerrado ao atingir o teto, evitando crescimento ilimitado de memória.
+- O cache das últimas análises finais ganhou teto consistente; a abertura demo usa a cotação autoritativa do instante de confirmação e exibe preço e horário confirmados; alertas de qualidade só disparam quando existe sinal ativo (`COMPRA` ou `VENDA`).
+
 ## Versão 0.7.0
 
 - Leitura complementar de IA com resposta estruturada, validação completa, timeout coerente, progresso visível e mensagens de erro úteis.
