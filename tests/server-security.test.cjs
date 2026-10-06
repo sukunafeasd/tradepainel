@@ -15,6 +15,22 @@ class FakeLive {
 }
 const credentials={status:()=>({configured:false,encryptionAvailable:true}),load:()=>({apiKey:"",model:"gpt-5"}),save:()=>({configured:true}),remove:()=>({configured:false})};
 
+test("simulador consulta REST quando cotacao do radar excede o limite de entrada",async()=>{
+  for(const restFresh of [true,false]){
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dieftrade-entry-freshness-'));let calls=0;
+    const live=new FakeLive();live.priceDatums=()=>({BTCUSDT:{symbol:'BTCUSDT',value:50000,exchangeTimestamp:Date.now()-3000,receivedAt:Date.now()-3000,source:'test',stale:false}});
+    const market={status:()=>({ok:true}),topPairs:async()=>[],klines:async()=>[],ticker:async()=>{calls++;const now=Date.now()-(restFresh?0:9000);return{last:51000,datum:{symbol:'BTCUSDT',value:51000,exchangeTimestamp:now,receivedAt:now,source:'test-rest',stale:false}};}};
+    const app=createServer({dataDirectory:dir,uiDirectory:dir,credentialStore:credentials,market,realtime:live});
+    try{
+      const {port,token}=await app.listen();
+      const res=await fetch(`http://127.0.0.1:${port}/api/paper/order`,{method:'POST',headers:{'X-Dief-Token':token,'Content-Type':'application/json'},body:JSON.stringify({symbol:'BTCUSDT',direction:'up',stake:100,durationMs:60000,interval:'1m'})});
+      assert.equal(calls,1);assert.equal(res.status,restFresh?201:503);
+      if(restFresh){const result=await res.json();assert.equal(result.trade.entryPrice,51000);assert.equal(result.trade.entryPriceSource,'test-rest');}
+      else{const snapshot=app.paper.snapshot();assert.equal(snapshot.balance,10000);assert.equal(snapshot.open.length,0);}
+    }finally{await app.close();fs.rmSync(dir,{recursive:true,force:true});}
+  }
+});
+
 test("API local rejeita chamadas sem token e não expõe chave", async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"dieftrade-server-"));
   const ui=path.join(dir,"ui");fs.mkdirSync(ui);fs.writeFileSync(path.join(ui,"index.html"),"ok");

@@ -2,6 +2,7 @@
 
 const INTERVALS = new Set(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]);
 const QUOTE = "USDT";
+const ENTRY_PRICE_MAX_AGE_MS = 2000;
 
 class AppError extends Error {
   constructor(message, { status = 400, code = "INVALID_INPUT", publicMessage = message, cause = null } = {}) {
@@ -77,6 +78,7 @@ function validateMarketDatum(datum, { maxAgeMs = Infinity, maxExchangeAgeMs = ma
 }
 
 module.exports = {
+  ENTRY_PRICE_MAX_AGE_MS,
   AppError,
   INTERVALS,
   cleanSymbol,

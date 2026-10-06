@@ -43,6 +43,18 @@ pnpm build
 
 O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas, sinais e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
 
+## Versão 0.9.1
+
+- Identidade visual da Equipe Dief, icone oficial no Windows e nome DiefTrade preservado.
+- Cinco temas refinados, layout adaptativo, controles Lucide e maior legibilidade.
+- Configuracoes com rolagem, isolamento do fundo e navegacao por teclado.
+- Motor tecnico, credenciais protegidas e dados de simulacao preservados.
+- Radar realtime ignora itens fora do contrato sem interromper pares validos.
+- Simulador consulta uma cotacao nova quando o radar tem dados mais antigos
+  que o limite de entrada; dados atrasados continuam bloqueados sem debitar saldo.
+- `pnpm run test:ui` valida temas, tamanhos, abas, grafico e acessibilidade
+  com dados locais de teste. Instale o Chromium com `pnpm exec playwright install chromium`.
+
 ## Versão 0.9.0
 
 - A leitura bruta e o sinal confirmado são entidades distintas. Um sinal só confirma após avaliações diferentes e estáveis, MTF/qualidade mínimos e uma cotação realtime fresca.

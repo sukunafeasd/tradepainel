@@ -18,6 +18,7 @@ let localAddress = null;
 let quitting = false;
 let closingServer = false;
 let focusRequested = false;
+if (process.platform === "win32") app.setAppUserModelId("br.com.dief.trade");
 
 if (process.env.DIEFTRADE_SMOKE_SCREENSHOT) app.setPath("userData", path.join(app.getPath("temp"), `dieftrade-smoke-${process.pid}`));
 const primaryInstance = process.env.DIEFTRADE_SMOKE_SCREENSHOT || app.requestSingleInstanceLock();
@@ -37,8 +38,8 @@ async function createMainWindow() {
   const window = new BrowserWindow({
     width: 1540,
     height: 960,
-    minWidth: 1120,
-    minHeight: 700,
+    minWidth: 960,
+    minHeight: 640,
     show: false,
     title: "DiefTrade",
     icon: path.join(__dirname, "..", "assets", "brand", "dieftrade.ico"),
@@ -90,6 +91,10 @@ async function start() {
 
 if (primaryInstance) app.whenReady().then(start).catch((error) => {
   console.error(error);
+  if (process.env.DIEFTRADE_SMOKE_SCREENSHOT) {
+    void Promise.resolve(localServer?.close()).finally(() => app.exit(1));
+    return;
+  }
   app.quit();
 });
 

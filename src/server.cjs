@@ -14,7 +14,7 @@ const { AiReader } = require("./engine/ai-reader.cjs");
 const { AdaptiveCalibrator } = require("./engine/adaptive-calibration.cjs");
 const { ExchangeClock } = require("./engine/clock.cjs");
 const { SignalLifecycleStore } = require("./engine/signal-lifecycle.cjs");
-const { AppError, cleanSymbol, cleanInterval, cleanLimit, plainObject } = require("./engine/contracts.cjs");
+const { AppError, cleanSymbol, cleanInterval, cleanLimit, plainObject, validateMarketDatum, ENTRY_PRICE_MAX_AGE_MS } = require("./engine/contracts.cjs");
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png", ".ico": "image/x-icon", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 
@@ -329,7 +329,8 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
       // A abertura não espera uma análise de rede: usa a última leitura visível, quando
       // recente, e captura a cotação autoritativa no exato momento da confirmação.
       let datum = priceDatums()[symbol];
-      if (!datum) { const ticker = await marketClient.ticker(symbol, { force: true }); datum = ticker.datum; }
+      const candidate = validateMarketDatum(datum, { symbol, maxAgeMs: ENTRY_PRICE_MAX_AGE_MS, now: clock.now() });
+      if (!candidate || candidate.stale) { const ticker = await marketClient.ticker(symbol, { force: true }); datum = ticker.datum; }
       const signal = lifecycle.get(symbol, interval);
       if (input.signalId && signal?.signalId !== input.signalId) throw new AppError("O sinal selecionado não é mais o sinal atual. Atualize a leitura.", { status: 409, code: "SIGNAL_MISMATCH" });
       const trade = paper.place({ ...input, symbol, interval, entryDatum: datum, entryPrice: undefined, analysisSnapshot: AdaptiveCalibrator.snapshot(reading), signalContext: signal?.signalId ? { signalId: signal.signalId, signalConfirmedAt: signal.confirmedAt, signalConfirmedPrice: signal.confirmedPrice, signalAgeAtOrder: Math.max(0, clock.now() - Number(signal.confirmedAt)), analysisId: reading?.id || null } : null, idempotencyKey: req.headers["idempotency-key"] || input.idempotencyKey, now: clock.now() });

@@ -31,15 +31,14 @@ async function runSmoke(mainWindow, environment = process.env) {
       apiKeyFormatHint:document.querySelector('.secure-note')?.textContent.includes('AQ.')||false
     };
   })()`);
+  result.ok = Boolean(result.bootstrapReady && result.marketOnline && /^Entrada confirmada/.test(result.paperMessage) && result.coinCount > 0 && result.price !== "--" && result.chartTools >= 5 && result.simStats >= 5 && result.healthItems >= 8);
+  if (environment.DIEFTRADE_SMOKE_REPORT) fs.writeFileSync(environment.DIEFTRADE_SMOKE_REPORT, JSON.stringify(result, null, 2));
+  const image = await mainWindow.webContents.capturePage();
+  fs.writeFileSync(screenshotFile, image.toPNG());
   if (!result.bootstrapReady) throw new Error("A interface não concluiu o carregamento durante o smoke test.");
   if (!result.marketOnline) throw new Error("O fluxo ao vivo não ficou saudável durante o smoke test.");
   if (!/^Entrada confirmada/.test(result.paperMessage)) throw new Error(`A operação demo não foi confirmada no smoke test: ${result.paperMessage || "sem retorno"}`);
   if (!(result.coinCount > 0) || result.price === "--" || result.chartTools < 5 || result.simStats < 5 || result.healthItems < 8) throw new Error("A interface carregou com componentes essenciais ausentes.");
-  if (environment.DIEFTRADE_SMOKE_REPORT) {
-    fs.writeFileSync(environment.DIEFTRADE_SMOKE_REPORT, JSON.stringify(result, null, 2));
-  }
-  const image = await mainWindow.webContents.capturePage();
-  fs.writeFileSync(screenshotFile, image.toPNG());
   return result;
 }
 

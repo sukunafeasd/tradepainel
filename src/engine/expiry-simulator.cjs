@@ -3,7 +3,7 @@
 const crypto = require("crypto");
 const { JsonStore } = require("./storage.cjs");
 const { TradeArchive } = require("./trade-archive.cjs");
-const { AppError, cleanSymbol, cleanInterval, finiteNumber, validateMarketDatum } = require("./contracts.cjs");
+const { AppError, cleanSymbol, cleanInterval, finiteNumber, validateMarketDatum, ENTRY_PRICE_MAX_AGE_MS } = require("./contracts.cjs");
 
 const SCHEMA_VERSION = 4;
 const ALLOWED_DURATIONS = new Set([30000, 60000, 120000, 300000, 900000]);
@@ -233,7 +233,7 @@ class ExpirySimulator {
     const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey);
     if (normalizedIdempotencyKey && data.idempotency[normalizedIdempotencyKey]) return data.open.find((trade) => trade.id === data.idempotency[normalizedIdempotencyKey]) || data.results.find((trade) => trade.id === data.idempotency[normalizedIdempotencyKey]);
     const legacyPrice = Number(entryPrice);
-    const datum = entryDatum ? validateMarketDatum(entryDatum, { symbol: clean, maxAgeMs: 2000, now }) : Number.isFinite(legacyPrice) && legacyPrice > 0 ? { symbol: clean, value: legacyPrice, exchangeTimestamp: now, receivedAt: now, source: "validated-caller", stale: false } : null;
+    const datum = entryDatum ? validateMarketDatum(entryDatum, { symbol: clean, maxAgeMs: ENTRY_PRICE_MAX_AGE_MS, now }) : Number.isFinite(legacyPrice) && legacyPrice > 0 ? { symbol: clean, value: legacyPrice, exchangeTimestamp: now, receivedAt: now, source: "validated-caller", stale: false } : null;
     if (!datum || datum.stale) throw new AppError("Preço de entrada fresco indisponível.", { status: 503, code: "FRESH_PRICE_UNAVAILABLE" });
     const linkedSignal = signalContext?.signalId ? { signalId: String(signalContext.signalId).slice(0, 128), signalConfirmedAt: Number(signalContext.signalConfirmedAt), signalConfirmedPrice: Number(signalContext.signalConfirmedPrice), signalAgeAtOrder: Math.max(0, Number(signalContext.signalAgeAtOrder) || 0), sourceAnalysisId: signalContext.analysisId ? String(signalContext.analysisId).slice(0, 240) : null } : {};
     const trade = { id: id(), symbol: clean, direction, stake: amount, entryPrice: datum.value, currentPrice: datum.value, entryPriceAt: datum.exchangeTimestamp, entryPriceSource: datum.source, openedAt: now, expiresAt: now + duration, durationMs: duration, interval: frame, payoutRate: data.payoutRate, note: String(note || "").slice(0, 300), analysisSnapshot, ...linkedSignal, status: "open", settlementAttempts: 0 };

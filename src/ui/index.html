@@ -7,11 +7,11 @@
   <link rel="icon" href="/brand.png">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/trading.css">
+  <link rel="stylesheet" href="/refinements.css">
 </head>
 <body>
-  <div class="ambient a1"></div><div class="ambient a2"></div>
   <header class="topbar">
-    <div class="brand"><img src="/brand.png" alt="DiefTrade"><div><b>DiefTrade</b><span>Market Intelligence</span></div></div>
+    <div class="brand"><img src="/brand.png" alt="Equipe Dief"><div><b>DiefTrade</b><span>Equipe Dief · Mercado & simulação</span></div></div>
     <div class="market-state"><span class="pulse" id="pulse"></span><span id="connection">conectando…</span><span class="divider"></span><span id="clock">--:--:--</span></div>
     <div class="pixel-wrap mood-flat" id="pixel" title="Pixel, o pato trader">
       <svg width="52" height="52" viewBox="0 0 64 64" aria-label="Pixel, o pato trader">
@@ -20,7 +20,7 @@
       </svg><span id="pixelTip">de olho no mercado</span>
     </div>
     <div class="safety">ANÁLISE + SIMULAÇÃO <b>• SEM ORDENS REAIS</b></div>
-    <button type="button" class="settings-button" id="openSettings" title="Aparência e configurações">⚙</button>
+    <button type="button" class="settings-button" id="openSettings" title="Aparência e configurações" aria-label="Aparência e configurações">⚙</button>
   </header>
 
   <div class="shell">
@@ -99,5 +99,6 @@
   <div class="modal-backdrop" id="settingsModal" aria-hidden="true"><section class="settings-modal panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="section-head"><div><span class="eyebrow">PERSONALIZAÇÃO + SAÚDE</span><h2 id="settingsTitle">Preferências do DiefTrade</h2></div><button type="button" class="modal-close" id="closeSettings" aria-label="Fechar configurações">×</button></div><p>Escolha um visual. A preferência fica salva somente neste computador.</p><div class="theme-grid" id="themeGrid"><button type="button" data-theme="dief" class="theme-choice active"><i class="swatch dief"></i><b>Dief original</b><span>Verde profundo + ouro</span></button><button type="button" data-theme="terminal" class="theme-choice"><i class="swatch terminal"></i><b>Terminal Pro</b><span>Clássico de mercado</span></button><button type="button" data-theme="midnight" class="theme-choice"><i class="swatch midnight"></i><b>Midnight</b><span>Azul técnico</span></button><button type="button" data-theme="light" class="theme-choice"><i class="swatch light"></i><b>Professional Light</b><span>Claro e padrão</span></button><button type="button" data-theme="graphite" class="theme-choice"><i class="swatch graphite"></i><b>Graphite Gold</b><span>Preto + dourado</span></button></div><div class="settings-row"><label>Escala da interface<select id="uiScale"><option value="compact">Compacta</option><option value="normal" selected>Normal</option><option value="comfortable">Confortável</option></select></label><label><input type="checkbox" id="reduceMotion"> Reduzir animações</label><label><input type="checkbox" id="alertSound" checked> Som nos alertas</label></div><div class="health-panel"><div class="section-head"><h3>Saúde do painel</h3><button class="primary ghost" id="refreshHealth" type="button">Verificar agora</button></div><div class="health-grid" id="healthGrid"><span>Carregando diagnóstico…</span></div></div></section></div>
   <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
   <script src="/app.js" defer></script>
+  <script type="module" src="/brand-ui.js"></script>
 </body>
 </html>

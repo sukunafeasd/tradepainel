@@ -170,8 +170,11 @@ class RealtimeHub extends EventEmitter {
         if (!Array.isArray(rows)) throw new Error("miniTicker inválido");
         const nowMono = performance.now(); const receivedAt = this.clock.now(); let accepted = 0;
         for (const row of rows) {
-          const symbol = String(row.s || "");
+          if (!row || typeof row !== "object") { this.metrics.malformedEvents += 1; continue; }
+          let symbol = String(row.s || "");
           if (!symbol.endsWith("USDT")) continue;
+          try { symbol = cleanSymbol(symbol); }
+          catch { this.metrics.malformedEvents += 1; continue; }
           const base = symbol.slice(0, -4);
           if (STABLES.has(base) || /(UP|DOWN|BULL|BEAR)$/.test(base)) continue;
           const last = finitePositive(row.c); const open = finitePositive(row.o); const high = finitePositive(row.h); const low = finitePositive(row.l); const volume = finiteNonnegative(row.v); const quoteVolume = finiteNonnegative(row.q);
