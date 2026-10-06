@@ -95,8 +95,8 @@ class TradeArchive {
   get size() { return this.rows.length; }
 
   clear() {
-    this.rows = []; this.keys.clear();
     try { fs.unlinkSync(this.file); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    this.rows = []; this.keys.clear();
   }
 
   diagnostics() { return { file: this.file, records: this.size, issues: this.issues.slice() }; }

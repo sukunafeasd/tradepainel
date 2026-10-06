@@ -32,6 +32,7 @@ const credentials={status:()=>({configured:false,encryptionAvailable:true}),load
         await page.locator('#openSettings').click();
         await page.locator(`button[data-theme="${theme}"]`).click();
         assert.equal(await page.locator('body').getAttribute('data-theme'),theme);
+        await page.waitForFunction(()=>getComputedStyle(document.getElementById('chartZoomIn')).backgroundColor===getComputedStyle(document.querySelector('.search')).backgroundColor);
         assert.equal(await page.locator('.shell').evaluate(e=>e.inert),true);
         await page.keyboard.press('Escape');
         assert.equal(await page.evaluate(()=>document.activeElement.id),'openSettings');
@@ -46,6 +47,7 @@ const credentials={status:()=>({configured:false,encryptionAvailable:true}),load
     await page.setViewportSize({width:1540,height:960});
     await page.locator('#openSettings').click();await page.locator('button[data-theme="dief"]').click();await page.keyboard.press('Escape');
     await page.locator('[data-tab="reading"]').click();
+    await page.waitForFunction(()=>getComputedStyle(document.getElementById('chartZoomIn')).backgroundColor===getComputedStyle(document.querySelector('.search')).backgroundColor);
     await page.evaluate(()=>window.scrollTo(0,0));
     await page.mouse.move(0,0);
     await page.screenshot({path:path.join(os.tmpdir(),'dieftrade-terminal-refinado.png'),fullPage:false});
@@ -53,6 +55,15 @@ const credentials={status:()=>({configured:false,encryptionAvailable:true}),load
     assert.ok(pixels>1000,'Chart must not be blank');
     assert.equal(await page.locator('#chartZoomIn svg').count(),1);
     assert.equal(await page.locator('.brand img').evaluate(img=>img.complete&&img.naturalWidth>0),true);
+    await page.locator('.coin-row').first().focus();
+    await page.evaluate(()=>renderCoins());
+    assert.equal(await page.evaluate(()=>document.activeElement.dataset.symbol),'BTCUSDT');
+    await page.locator('[data-tab="paper"]').click();
+    const balance=await page.locator('#cash').textContent();
+    await page.locator('#paperPayout').selectOption('0.90');
+    await page.waitForFunction(()=>document.getElementById('payoutRate').textContent==='90%'&&!document.getElementById('paperPayout').disabled);
+    assert.equal(await page.locator('#cash').textContent(),balance);
+    await page.locator('[data-tab="reading"]').click();
     await page.locator('#openSettings').click();await page.locator('#closeSettings').focus();await page.keyboard.press('Shift+Tab');
     assert.equal(await page.evaluate(()=>document.activeElement.id),'refreshHealth');
     await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement.id),'closeSettings');

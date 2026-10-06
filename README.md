@@ -43,6 +43,20 @@ pnpm build
 
 O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas, sinais e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
 
+## Versão 0.9.2
+
+- Atualizacao automatica nao cancela uma analise lenta ainda em andamento.
+- Timeout cobre tambem o corpo HTTP e remove listeners de cancelamento ao concluir.
+- Troca de mercado limpa a vela provisoria e invalida a resposta anterior da IA.
+- Mudanca de retorno preserva saldo e historico; buscas antigas do diario nao
+  substituem resultados mais recentes.
+- Desenhos invalidos sao filtrados; falha de armazenamento nao interrompe o grafico.
+- Backup validado recupera um arquivo principal ausente. Falha ao limpar o
+  historico preserva seu indice em memoria.
+- Controles, seletores, feedback e formularios seguem os cinco temas; foco do
+  radar e mantido durante atualizacoes e as escalas ajustam a densidade das linhas.
+- Regressao automatizada inclui respostas lentas, recuperacao e estados da interface.
+
 ## Versão 0.9.1
 
 - Identidade visual da Equipe Dief, icone oficial no Windows e nome DiefTrade preservado.

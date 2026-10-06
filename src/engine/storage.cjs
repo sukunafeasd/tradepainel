@@ -47,7 +47,7 @@ function readJson(file, fallback, { validate = null, migrate = null, onIssue = n
     if (typeof validate === "function" && !validate(parsed)) throw new StorageError("O arquivo não corresponde ao schema esperado.", { code: "INVALID_SCHEMA", file });
     return parsed;
   } catch (error) {
-    if (error?.code === "ENOENT") return base;
+    if (error?.code === "ENOENT" && (!recoverBackup || !fs.existsSync(`${file}.bak`))) return base;
     const issue = error instanceof StorageError ? error : new StorageError("Não foi possível ler os dados persistidos.", { code: error instanceof SyntaxError ? "INVALID_JSON" : error?.code || "READ_FAILED", file, cause: error });
     let recovery = null;
     if (recoverBackup) {

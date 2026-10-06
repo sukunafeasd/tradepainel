@@ -1,7 +1,14 @@
 "use strict";
 const test=require("node:test");const assert=require("node:assert/strict");const fs=require("node:fs");const os=require("node:os");const path=require("node:path");
 const {JsonStore,readJson,writeJson}=require("../src/engine/storage.cjs");
+const {TradeArchive}=require("../src/engine/trade-archive.cjs");
 const temp=()=>fs.mkdtempSync(path.join(os.tmpdir(),"dieftrade-storage-"));
+
+test("arquivo principal ausente recupera backup validado",()=>{const dir=temp(),file=path.join(dir,"state.json");try{fs.writeFileSync(`${file}.bak`,JSON.stringify({n:42}));const issues=[];assert.deepEqual(readJson(file,{n:0},{validate:v=>Number.isInteger(v?.n),onIssue:i=>issues.push(i)}),{n:42});assert.equal(JSON.parse(fs.readFileSync(file,"utf8")).n,42);assert.equal(issues[0].recovery.source,`${file}.bak`);}finally{fs.rmSync(dir,{recursive:true,force:true});}});
+
+test("backup invalido nao e usado quando principal esta ausente",()=>{const dir=temp(),file=path.join(dir,"state.json");try{fs.writeFileSync(`${file}.bak`,'{"n":"invalid"}');assert.deepEqual(readJson(file,{n:0},{validate:v=>Number.isInteger(v?.n)}),{n:0});assert.equal(fs.existsSync(file),false);}finally{fs.rmSync(dir,{recursive:true,force:true});}});
+
+test("falha ao limpar arquivo preserva indice do historico",t=>{const dir=temp();try{const archive=new TradeArchive(dir);archive.append({id:"one"});t.mock.method(fs,"unlinkSync",()=>{throw Object.assign(new Error("locked"),{code:"EBUSY"});});assert.throws(()=>archive.clear(),{code:"EBUSY"});assert.equal(archive.size,1);assert.equal(archive.has("one"),true);t.mock.restoreAll();archive.clear();assert.equal(archive.size,0);}finally{t.mock.restoreAll();fs.rmSync(dir,{recursive:true,force:true});}});
 
 test("JSON null ou corrompido não vira função e é diagnosticado",()=>{const dir=temp(),file=path.join(dir,"state.json");try{fs.writeFileSync(file,"null");const issues=[];const value=readJson(file,()=>({ok:true}),{validate:v=>v?.ok===true,onIssue:i=>issues.push(i)});assert.deepEqual(value,{ok:true});assert.equal(issues[0].code,"NULL_JSON");assert.ok(fs.readdirSync(dir).some(name=>name.includes("corrupt")));}finally{fs.rmSync(dir,{recursive:true,force:true});}});
 
