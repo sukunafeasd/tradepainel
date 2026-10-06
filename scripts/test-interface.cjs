@@ -7,8 +7,9 @@ const {createServer}=require('../src/server.cjs');
 const {chromium}=require('playwright');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'dieftrade-design-'));
 class Live extends EventEmitter {
-  constructor(){super();this.symbol='BTCUSDT';this.interval='15m';}
-  start(){}close(){}select(s,i){this.symbol=s;this.interval=i;}addClient(){return()=>{};}
+  constructor(){super();this.symbol='BTCUSDT';this.interval='15m';this.clients=new Set();}
+  start(){}close(){}select(s,i){this.symbol=s;this.interval=i;}addClient(send){this.clients.add(send);send({type:'snapshot',data:this.snapshot()});return()=>this.clients.delete(send);}
+  publish(data){for(const send of this.clients)send({type:'snapshot',data});}
   marketSnapshot(){return[{symbol:'BTCUSDT',base:'BTC',last:50000,changePct:1.24,quoteVolume:1e9},{symbol:'ETHUSDT',base:'ETH',last:2000,changePct:-.62,quoteVolume:5e8}];}
   priceDatums(){return{BTCUSDT:{symbol:'BTCUSDT',value:50000,exchangeTimestamp:Date.now(),receivedAt:Date.now(),source:'test',stale:false}};}
   snapshot(){return{symbol:this.symbol,interval:this.interval,connected:true,stale:false,ticker:{last:50000,changePct:1.24},book:{bids:[[49999,2]],asks:[[50001,2]]},trades:[],flow:{buyRatio:.5}};}
@@ -19,13 +20,25 @@ const credentials={status:()=>({configured:false,encryptionAvailable:true}),load
 (async()=>{
   let browser,server;
   try{
-    server=createServer({dataDirectory:root,uiDirectory:path.join(__dirname,'../src/ui'),credentialStore:credentials,market,realtime:new Live()});
+    const realtime=new Live();
+    server=createServer({dataDirectory:root,uiDirectory:path.join(__dirname,'../src/ui'),credentialStore:credentials,market,realtime});
     const {port,token}=await server.listen();
     browser=await chromium.launch({executablePath:process.env.DIEFTRADE_CHROMIUM_PATH||chromium.executablePath(),headless:true});
     const page=await browser.newPage({viewport:{width:1540,height:960}}),errors=[];
     page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${port}/#t=${token}`);
     await page.waitForFunction(()=>document.getElementById('coinCount').textContent==='2'&&document.getElementById('signal').textContent!=='ANALISANDO');
+    const last=await page.evaluate(()=>state.analysis.series.candles.at(-1).t);
+    const candle={t:last+900000,open:50000,high:50010,low:49990,close:50010,volume:20,closed:false};
+    realtime.publish({...realtime.snapshot(),candle});
+    await page.waitForFunction(()=>state.liveCandles?.at(-1)?.close===50010);
+    realtime.publish({...realtime.snapshot(),interval:'1m',candle:{...candle,close:49995}});
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(()=>state.liveCandles.at(-1).close),50010);
+    realtime.publish({...realtime.snapshot(),candle:{...candle,closed:true}});
+    realtime.publish({...realtime.snapshot(),candle:{...candle,t:candle.t+900000,close:50005}});
+    await page.waitForFunction(()=>state.liveCandles?.length===2);
+    assert.equal(await page.evaluate(()=>state.liveCandles[0].closed),true);
     for(const size of [{width:1540,height:960},{width:1120,height:720},{width:960,height:640},{width:480,height:800}]){
       await page.setViewportSize(size);
       for(const theme of ['dief','terminal','midnight','graphite','light']){

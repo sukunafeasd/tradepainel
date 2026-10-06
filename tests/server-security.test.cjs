@@ -15,6 +15,16 @@ class FakeLive {
 }
 const credentials={status:()=>({configured:false,encryptionAvailable:true}),load:()=>({apiKey:"",model:"gpt-5"}),save:()=>({configured:true}),remove:()=>({configured:false})};
 
+test('mudanca lenta de mercado nao sobrescreve configuracao mais recente',async()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dieftrade-select-race-')),live=new FakeLive();let release,started;
+  const slow=new Promise(r=>release=r),entered=new Promise(r=>started=r);
+  const market={status:()=>({ok:true}),topPairs:async()=>[],klines:async()=>[],assertTradable:async s=>{if(s==='ETHUSDT'){started();await slow;}}};
+  const app=createServer({dataDirectory:dir,uiDirectory:dir,credentialStore:credentials,market,realtime:live});
+  try{const {port,token}=await app.listen();const select=(symbol,interval)=>fetch(`http://127.0.0.1:${port}/api/live/select`,{method:'POST',headers:{'X-Dief-Token':token,'Content-Type':'application/json'},body:JSON.stringify({symbol,interval})});
+    const old=select('ETHUSDT','1m');await entered;const latest=await select('BTCUSDT','5m');assert.equal(latest.status,200);release();assert.equal((await old).status,409);assert.equal(live.symbol,'BTCUSDT');assert.equal(live.interval,'5m');
+  }finally{release();await app.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test("simulador consulta REST quando cotacao do radar excede o limite de entrada",async()=>{
   for(const restFresh of [true,false]){
     const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dieftrade-entry-freshness-'));let calls=0;

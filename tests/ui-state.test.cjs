@@ -13,6 +13,21 @@ function harness(extra={}){
   vm.runInContext(source,context);
   return{context,run:code=>vm.runInContext(code,context)};
 }
+test('dados ausentes nao sao formatados como zero',()=>{const h=harness();for(const fn of ['fmt','money','pct','priceFormat']){assert.equal(h.run(`${fn}(null)`),'--');assert.equal(h.run(`${fn}(undefined)`),'--');assert.equal(h.run(`${fn}("")`),'--');}assert.equal(h.run('fmt(0)'),'0');assert.equal(h.run('pct(0)'),'+0.00%');});
+test('virada de periodo preserva velas recebidas antes do proximo REST',()=>{
+  const h=harness();h.run('requestChart=()=>{};state.analysis={series:{candles:[{t:1,close:100}]}};');
+  const candle={t:2,open:100,high:105,low:99,close:103,volume:5,closed:false};
+  h.context.candle=candle;h.run('mergeLiveCandle(candle)');
+  h.context.candle={...candle,closed:true};h.run('mergeLiveCandle(candle)');
+  h.context.candle={...candle,t:3};h.run('mergeLiveCandle(candle)');
+  assert.equal(h.run('displayCandles().length'),3);assert.equal(h.run('displayCandles()[1].closed'),true);
+  h.context.candle=candle;h.run('mergeLiveCandle(candle)');assert.equal(h.run('displayCandles().at(-1).t'),3);
+});
+test('redesenhos sao consolidados em um frame sem cancelar o anterior',()=>{
+  const frames=[];const h=harness({requestAnimationFrame:cb=>{frames.push(cb);return frames.length;}});
+  h.run('drawChart=()=>{};requestChart();requestChart();requestChart();');assert.equal(frames.length,1);frames[0]();h.run('requestChart()');assert.equal(frames.length,2);
+});
+test('historico confirmado nao e substituido por vela provisoria antiga',()=>{const h=harness();h.run('state.analysis={series:{candles:[{t:2,close:105,closed:true}]}};state.liveCandles=[{t:2,close:99,closed:false}];');assert.equal(h.run('displayCandles()[0].close'),105);});
 test("polling nao cancela analise lenta ainda em andamento",async()=>{
   let resolve,calls=0;
   const pending=new Promise(r=>resolve=r);

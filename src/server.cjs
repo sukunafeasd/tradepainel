@@ -70,6 +70,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   const rate = new Map();
   const analysisAlertSchedule = new Map();
   let server;
+  let selectionRevision = 0;
   let settlementTimer = null;
   let alertMonitorTimer = null;
   let settlementRunning = false;
@@ -294,12 +295,16 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if (pathname === "/api/live/select") {
       if (req.method !== "POST") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
       const input = await body(req); const symbol = cleanSymbol(input.symbol); const interval = cleanInterval(input.interval);
+      const revision = ++selectionRevision;
       if (marketClient.assertTradable) await marketClient.assertTradable(symbol);
+      if (revision !== selectionRevision) return fail(res, 409, "Seleção substituída por uma alteração mais recente.", "SELECTION_SUPERSEDED");
       live.select(symbol, interval); analysisCache.clear(); return json(res, 200, { ok: true, symbol, interval, generation: live.symbolGeneration });
     }
     if (pathname === "/api/live/stream") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
+      req.socket.setNoDelay(true);
       res.writeHead(200, { ...securityHeaders("text/event-stream; charset=utf-8"), Connection: "keep-alive", "X-Accel-Buffering": "no" });
+      res.flushHeaders();
       const writer = createSseWriter(res); writer.send("ready", { symbol: live.symbol, interval: live.interval, localConnected: true });
       const remove = live.addClient((event) => writer.send(event.type, event.data));
       const keepAlive = setInterval(() => writer.send("ping"), 12000); const entry = { res, remove, keepAlive, writer }; sseResponses.add(entry);

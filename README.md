@@ -45,6 +45,15 @@ O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, s
 
 ## Versão 0.9.2
 
+- Fluxo local consolida snapshots a cada 100 ms, com redraw por frame e sem
+  reconstruir book e negocios enquanto essa aba esta oculta.
+- Negocios atualizam OHLC provisorio sem duplicar volume; velas fechadas e
+  mudancas de periodo sao preservadas entre consultas de analise.
+- Eventos antigos nao fazem o preco retroceder e mudancas concorrentes de par
+  respeitam a selecao mais recente. Campos indisponiveis nao viram zero.
+- Latencia da rede/bolsa continua existindo; velas e sinais confirmados nao sao
+  substituidos por extrapolacoes de preco.
+
 - Atualizacao automatica nao cancela uma analise lenta ainda em andamento.
 - Timeout cobre tambem o corpo HTTP e remove listeners de cancelamento ao concluir.
 - Troca de mercado limpa a vela provisoria e invalida a resposta anterior da IA.

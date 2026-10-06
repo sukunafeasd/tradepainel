@@ -3,9 +3,11 @@
 const state = { token:"", symbol:"BTCUSDT", interval:"15m", coins:[], live:null, analysis:null, paper:null, calibration:null, health:null, signals:[], signalHistory:[], alerts:[], journal:[], journalPage:{total:0,offset:0,limit:25,hasMore:false,query:""}, side:"buy", eventSource:null, chartFrame:null, chartZoom:120, chartOffset:0, chartFollow:true, chartCrosshair:null, chartDrag:null, chartMetrics:null, chartTool:null, chartDraft:null, chartDrawings:[], lastResultId:null, paperSignature:"", selectionGeneration:0, analysisGeneration:0, analysisController:null, aiGeneration:0, settingsReturnFocus:null, storageWarningShown:false };
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>'"]/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
-const fmt = (v, max=8) => Number.isFinite(Number(v)) ? new Intl.NumberFormat("pt-BR",{maximumFractionDigits:max}).format(Number(v)) : "--";
-const money = (v) => Number.isFinite(Number(v)) ? new Intl.NumberFormat("pt-BR",{style:"currency",currency:"USD"}).format(Number(v)) : "--";
-const pct = (v,d=2) => Number.isFinite(Number(v)) ? `${Number(v)>=0?"+":""}${Number(v).toFixed(d)}%` : "--";
+const numberFormats=new Map(),currencyFormat=new Intl.NumberFormat("pt-BR",{style:"currency",currency:"USD"});
+const availableNumber=v=>v!=null&&v!==""&&Number.isFinite(Number(v));
+const fmt = (v, max=8) => {if(!availableNumber(v))return "--";if(!numberFormats.has(max))numberFormats.set(max,new Intl.NumberFormat("pt-BR",{maximumFractionDigits:max}));return numberFormats.get(max).format(Number(v));};
+const money = (v) => availableNumber(v) ? currencyFormat.format(Number(v)) : "--";
+const pct = (v,d=2) => availableNumber(v) ? `${Number(v)>=0?"+":""}${Number(v).toFixed(d)}%` : "--";
 const api = async (url, options={}) => {
   const timeoutMs=Number(options.timeoutMs)||15000,controller=new AbortController(),timer=setTimeout(()=>controller.abort(new DOMException("Tempo limite excedido.","TimeoutError")),timeoutMs),external=options.signal;
   const cancel=()=>controller.abort(external.reason);
@@ -17,7 +19,7 @@ const api = async (url, options={}) => {
   return data;
 };
 const toast = (message,error=false) => { const el=$("toast"); el.textContent=message; el.className=`toast show${error?" error":""}`; clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.className="toast",3200); };
-const priceFormat = (v) => { const n=Number(v); if(!Number.isFinite(n)) return "--"; const digits=n>=1000?2:n>=1?4:n>=.01?6:8; return `$${fmt(n,digits)}`; };
+const priceFormat = (v) => { if(!availableNumber(v)) return "--"; const n=Number(v),digits=n>=1000?2:n>=1?4:n>=.01?6:8; return `$${fmt(n,digits)}`; };
 
 function readToken(){const fragment=new URLSearchParams(location.hash.replace(/^#/,""));const supplied=fragment.get("t");if(supplied)sessionStorage.setItem("dieftrade.session",supplied);state.token=supplied||sessionStorage.getItem("dieftrade.session")||"";if(supplied)history.replaceState(null,"",`${location.pathname}${location.search}`);}
 function clock(){ $("clock").textContent=new Date().toLocaleTimeString("pt-BR"); }
@@ -52,7 +54,7 @@ async function bootstrap(){
 function bind(){
   $("coinSearch").addEventListener("input",renderCoins);
   $("intervals").addEventListener("click",async(e)=>{const b=e.target.closest("button[data-i]");if(!b||b.dataset.i===state.interval)return;const previous=state.interval;state.interval=b.dataset.i;await selectMarket({previousInterval:previous});});
-  $("tabs").addEventListener("click",(e)=>{const b=e.target.closest("button[data-tab]");if(!b)return;document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("active",x===b));document.querySelectorAll(".tab-page").forEach(x=>x.classList.toggle("active",x.id===`tab-${b.dataset.tab}`));if(b.dataset.tab==="reading")drawChart();});
+  $("tabs").addEventListener("click",(e)=>{const b=e.target.closest("button[data-tab]");if(!b)return;document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("active",x===b));document.querySelectorAll(".tab-page").forEach(x=>x.classList.toggle("active",x.id===`tab-${b.dataset.tab}`));if(b.dataset.tab==="reading")drawChart();if(b.dataset.tab==="flow"&&state.live){renderBook(state.live.book);renderTape(state.live.trades);}});
   document.querySelectorAll(".side-toggle button").forEach(b=>b.addEventListener("click",()=>{state.side=b.dataset.side;document.querySelectorAll(".side-toggle button").forEach(x=>x.classList.toggle("active",x===b));}));
   document.querySelectorAll(".side-toggle button").forEach(b=>b.addEventListener("click",updateOrderPreview));
   $("paperQty").addEventListener("input",updateOrderPreview);$("paperExpiry").addEventListener("change",updateOrderPreview);
@@ -69,7 +71,7 @@ function bind(){
   document.addEventListener("keydown",e=>{if(e.key==="Escape"&&$("settingsModal").classList.contains("open"))closeSettings();});
 }
 
-function requestChart(){if(state.chartFrame)cancelAnimationFrame(state.chartFrame);state.chartFrame=requestAnimationFrame(drawChart);}
+function requestChart(){if(state.chartFrame)return;state.chartFrame=requestAnimationFrame(()=>{state.chartFrame=null;drawChart();});}
 function setChartView(offset,zoom,follow=false){const max=Math.max(0,(state.analysis?.series?.candles?.length||0)-30);state.chartOffset=Math.max(0,Math.min(max,Number(offset)||0));state.chartZoom=Math.max(30,Math.min(260,Number(zoom)||120));state.chartFollow=Boolean(follow&&state.chartOffset===0);$("chartFollow").classList.toggle("active",state.chartFollow);requestChart();}
 function setAiProviderDefaults(force=false){const provider=$("aiProvider").value,target=provider==="gemini"?"gemini-2.5-flash":"gpt-5";if(force||!$("aiModel").value.trim())$("aiModel").value=target;$("aiKey").placeholder=provider==="gemini"?"Cole a chave do Google AI Studio":"Cole a chave da OpenAI";}
 
@@ -87,7 +89,7 @@ function renderCoins(){
   if(focusedSymbol)[...$("coinList").querySelectorAll('[data-symbol]')].find(row=>row.dataset.symbol===focusedSymbol)?.focus({preventScroll:true});
 }
 async function selectMarket({previousSymbol=null,previousInterval=null}={}){
-  const generation=++state.selectionGeneration;state.analysisController?.abort();state.analysis=null;state.live=null;state.provisionalCandle=null;state.aiGeneration++;$("aiRead").disabled=false;$("aiResult").textContent="A leitura de IA será limpa ao mudar de mercado.";
+  const generation=++state.selectionGeneration;state.analysisController?.abort();state.analysis=null;state.live=null;state.liveCandles=[];state.provisionalCandle=null;state.aiGeneration++;$("aiRead").disabled=false;$("aiResult").textContent="A leitura de IA será limpa ao mudar de mercado.";
   state.chartOffset=0;state.chartFollow=true;state.chartCrosshair=null;state.chartDraft=null;loadDrawings();
   updateSelection(); renderCoins(); $("chartEmpty").style.display="grid"; $("chartEmpty").textContent="Atualizando a leitura…";
   try{await api("/api/live/select",{method:"POST",body:JSON.stringify({symbol:state.symbol,interval:state.interval})});if(generation!==state.selectionGeneration)return;connectStream();await refreshAnalysis();}catch(error){if(generation!==state.selectionGeneration)return;if(previousSymbol)state.symbol=previousSymbol;if(previousInterval)state.interval=previousInterval;updateSelection();renderCoins();toast(error.message,true);}
@@ -98,7 +100,7 @@ function updateSelection(){
 function connectStream(){
   state.eventSource?.close(); const es=new EventSource(`/api/live/stream?t=${encodeURIComponent(state.token)}`); state.eventSource=es;
   es.addEventListener("ready",()=>setConnection(false,"serviço local conectado · aguardando mercado"));
-  es.addEventListener("snapshot",event=>{try{const next=JSON.parse(event.data);if(next.symbol&&next.symbol!==state.symbol)return;state.live=next;renderLive();}catch(error){console.warn("Snapshot inválido:",error.message);}});
+  es.addEventListener("snapshot",event=>{try{const next=JSON.parse(event.data);if((next.symbol&&next.symbol!==state.symbol)||(next.interval&&next.interval!==state.interval))return;state.live=next;renderLive();}catch(error){console.warn("Snapshot inválido:",error.message);}});
   es.addEventListener("market",event=>{try{const next=JSON.parse(event.data);if(Array.isArray(next)){state.coins=next;renderCoins();}}catch(error){console.warn("Mercado inválido:",error.message);}});
   es.addEventListener("coins",event=>{try{const next=JSON.parse(event.data);if(!Array.isArray(next))throw new Error("lista inválida");state.coins=next;renderCoins();}catch(error){console.warn("Lista de pares inválida:",error.message);}});
   es.addEventListener("alert",event=>{try{const alert=JSON.parse(event.data);notifyAlert(alert);state.alerts=state.alerts.map(item=>item.id===alert.id?alert:item);renderAlerts();}catch(error){console.warn("Alerta inválido:",error.message);}});
@@ -107,15 +109,22 @@ function connectStream(){
   es.onerror=()=>setConnection(false,"reconectando…");
 }
 function renderLive(){
-  const l=state.live;if(!l)return; setConnection(Boolean(l.connected&&!l.stale),l.stale?"dados atrasados":"mercado ao vivo");
+  const l=state.live;if(!l)return;const stale=Boolean(l.stale||l.freshness?.ticker?.stale);setConnection(Boolean(l.connected&&!stale),stale?"dados atrasados":"mercado ao vivo");
   if(l.ticker?.last) $("price").textContent=priceFormat(l.ticker.last);
   const coin=state.coins.find(c=>c.symbol===state.symbol); if(coin){$("change").textContent=pct(coin.changePct);$("change").className=coin.changePct>=0?"positive":"negative";}else{$("change").textContent="--";$("change").className="";}
-  const ratio=Number(l.flow?.buyRatio); $("buyRatio").textContent=Number.isFinite(ratio)?`${(ratio*100).toFixed(1)}%`:"--"; $("buySplit").style.width=`${(Number.isFinite(ratio)?ratio:.5)*100}%`;
-  const imb=Number(l.book?.imbalance); $("imbalance").textContent=Number.isFinite(imb)?`${(imb*100).toFixed(1)}%`:"--"; $("bookSplit").style.width=`${(Number.isFinite(imb)?imb:.5)*100}%`;
-  $("spread").textContent=pct(l.ticker?.spreadPct,4); const unit=state.symbol.replace(/USDT$/,'');$("delta").textContent=Number.isFinite(Number(l.flow?.deltaQuote))?`Delta: ${money(l.flow.deltaQuote)} · ${fmt(l.flow?.delta,4)} ${unit}`:`Delta: ${fmt(l.flow?.delta,4)} ${unit}`; renderBook(l.book);renderTape(l.trades);
+  const ratio=availableNumber(l.flow?.buyRatio)?Number(l.flow.buyRatio):NaN; $("buyRatio").textContent=Number.isFinite(ratio)?`${(ratio*100).toFixed(1)}%`:"--"; $("buySplit").style.width=`${(Number.isFinite(ratio)?ratio:.5)*100}%`;
+  const imb=availableNumber(l.book?.imbalance)?Number(l.book.imbalance):NaN; $("imbalance").textContent=Number.isFinite(imb)?`${(imb*100).toFixed(1)}%`:"--"; $("bookSplit").style.width=`${(Number.isFinite(imb)?imb:.5)*100}%`;
+  $("spread").textContent=pct(l.ticker?.spreadPct,4); const unit=state.symbol.replace(/USDT$/,'');$("delta").textContent=availableNumber(l.flow?.deltaQuote)?`Delta: ${money(l.flow.deltaQuote)} · ${fmt(l.flow?.delta,4)} ${unit}`:`Delta: ${fmt(l.flow?.delta,4)} ${unit}`;if($("tab-flow").classList.contains('active')){renderBook(l.book);renderTape(l.trades);}
   mergeLiveCandle(l.candle);
 }
-function mergeLiveCandle(candle){if(!candle||!state.analysis?.series?.candles?.length)return;state.provisionalCandle={...candle,provisional:!candle.closed};requestChart();}
+function mergeLiveCandle(candle){
+  if(!candle||!Number.isFinite(candle.t)||![candle.open,candle.high,candle.low,candle.close].every(v=>Number.isFinite(v)&&v>0)||!Number.isFinite(candle.volume)||candle.volume<0)return;
+  const rows=state.liveCandles||[],latest=rows.at(-1);
+  if(latest&&(candle.t<latest.t||(candle.t===latest.t&&latest.closed&&!candle.closed)))return;
+  state.liveCandles=[...rows.filter(row=>row.t!==candle.t),{...candle,provisional:!candle.closed}].slice(-30);
+  state.provisionalCandle=state.liveCandles.at(-1);requestChart();
+}
+function displayCandles(){const confirmed=state.analysis?.series?.candles||[],last=confirmed.at(-1)?.t||0;return [...confirmed,...(state.liveCandles||[]).filter(c=>c.t>last)].sort((a,b)=>a.t-b.t);}
 function renderBook(book={}){
   const side=(rows,kind)=>{const max=Math.max(...(rows||[]).map(x=>x[1]),1);return `<div class="book-side ${kind}">${(rows||[]).slice(0,12).map(([p,q])=>`<div class="book-row" style="--depth:${Math.max(4,q/max*100)}%"><span class="${kind==="ask"?"negative":"positive"}">${fmt(p,8)}</span><span>${fmt(q,5)}</span></div>`).join("")}</div>`};
   $("book").innerHTML=side(book.bids,"bid")+side(book.asks,"ask");
@@ -164,7 +173,7 @@ function chartPointerMove(event){const chart=$("chart"),box=chart.getBoundingCli
 
 function drawChart(){
   const style=getComputedStyle(document.body),colors={up:style.getPropertyValue('--up').trim(),down:style.getPropertyValue('--down').trim(),ema9:style.getPropertyValue('--ema9').trim(),ema20:style.getPropertyValue('--ema20').trim(),ema50:style.getPropertyValue('--ema50').trim(),vwap:style.getPropertyValue('--vwap').trim()};
-  const canvas=$("chart"),wrap=canvas.parentElement,a=state.analysis,confirmed=a?.series?.candles||[],provisional=state.provisionalCandle,lastConfirmed=confirmed.at(-1),all=provisional&&Number(provisional.t)>Number(lastConfirmed?.t||0)?[...confirmed,provisional]:confirmed; if(!all.length)return; const dpr=devicePixelRatio||1,w=wrap.clientWidth,h=wrap.clientHeight;canvas.width=w*dpr;canvas.height=h*dpr;const ctx=canvas.getContext("2d");ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);
+  const canvas=$("chart"),wrap=canvas.parentElement,a=state.analysis,all=displayCandles(); if(!a||!all.length)return; const dpr=devicePixelRatio||1,w=wrap.clientWidth,h=wrap.clientHeight;if(!w||!h)return;canvas.width=w*dpr;canvas.height=h*dpr;const ctx=canvas.getContext("2d");ctx.scale(dpr,dpr);ctx.clearRect(0,0,w,h);
   const end=Math.max(1,all.length-state.chartOffset),start=Math.max(0,end-state.chartZoom),candles=all.slice(start,end),count=candles.length,pad={l:12,r:82,t:12,b:74},cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;const highs=candles.map(c=>Number(c.high)),lows=candles.map(c=>Number(c.low)),rawMax=Math.max(...highs),rawMin=Math.min(...lows),margin=Math.max((rawMax-rawMin)*.06,rawMax*1e-6),max=rawMax+margin,min=rawMin-margin,range=Math.max(max-min,1e-9),y=v=>pad.t+(max-v)/range*ch,x=i=>pad.l+(i+.5)/count*cw,bar=Math.max(1,cw/count*.62),firstT=Number(candles[0]?.t||0),lastT=Number(candles.at(-1)?.t||firstT+1),xTime=t=>pad.l+(Number(t)-firstT)/Math.max(1,lastT-firstT)*cw;state.chartMetrics={cw,ch,count,pad,w,h,start,end,min,max,range,firstT,lastT};
   ctx.strokeStyle=getComputedStyle(document.body).getPropertyValue("--line")||"#14271b";ctx.fillStyle=getComputedStyle(document.body).getPropertyValue("--muted")||"#6e8176";ctx.font="10px Segoe UI";for(let i=0;i<6;i++){const yy=pad.t+i*ch/5;ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke();const val=max-i*range/5;ctx.fillText(fmt(val,val>100?2:6),w-pad.r+8,yy+3)}
   for(let i=0;i<5;i++){const idx=Math.min(count-1,Math.round(i*(count-1)/4)),xx=x(idx),date=new Date(Number(candles[idx]?.t||0)),time=state.interval==="1d"?date.toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit",year:"2-digit"}):date.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});ctx.fillStyle=getComputedStyle(document.body).getPropertyValue("--muted")||"#6e8176";ctx.fillText(time,Math.max(pad.l,Math.min(w-pad.r-50,xx-22)),h-4);}

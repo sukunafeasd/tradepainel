@@ -3,6 +3,36 @@ const test=require("node:test");const assert=require("node:assert/strict");const
 
 class FakeSocket extends EventEmitter{static CONNECTING=0;static OPEN=1;static CLOSED=3;static instances=[];constructor(url){super();this.url=url;this.readyState=FakeSocket.CONNECTING;this.sent=[];FakeSocket.instances.push(this);}open(){this.readyState=FakeSocket.OPEN;this.emit("open");}send(value){this.sent.push(JSON.parse(value));}message(value){this.emit("message",Buffer.from(JSON.stringify(value)));}close(){this.readyState=FakeSocket.CLOSED;this.emit("close");}terminate(){this.close();}}
 const clock={now:()=>1_800_000_000_000,status:()=>({synced:true})};
+const kline=(overrides={})=>({stream:'btcusdt@kline_15m',data:{e:'kline',E:clock.now()-200,s:'BTCUSDT',k:{s:'BTCUSDT',i:'15m',t:clock.now()-5000,T:clock.now()+894999,o:'100',h:'102',l:'98',c:'101',v:'10',q:'1000',n:10,V:'5',x:false,...overrides}}});
+
+test('negocio atualiza OHLC provisorio sem duplicar volume da bolsa',()=>{
+  FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message(kline());socket.message({data:{e:'aggTrade',s:'BTCUSDT',a:100,T:clock.now(),p:'105',q:'3',m:false}});
+    assert.equal(hub.snapshot().candle.close,105);assert.equal(hub.snapshot().candle.high,105);assert.equal(hub.snapshot().candle.volume,10);
+    socket.message(kline());assert.equal(hub.snapshot().candle.close,105);
+  }finally{hub.close();}
+});
+test('preco e vela nao retrocedem com eventos atrasados',()=>{
+  FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message(kline({x:true}));socket.message(kline());assert.equal(hub.snapshot().candle.closed,true);
+    socket.message({data:{e:'aggTrade',s:'BTCUSDT',a:2,T:clock.now(),p:'105',q:'3',m:false}});
+    socket.message({data:{e:'aggTrade',s:'BTCUSDT',a:1,T:clock.now()-100,p:'99',q:'3',m:false}});
+    assert.equal(hub.snapshot().ticker.last,105);assert.equal(hub.snapshot().flow.trades,1);assert.equal(hub.snapshot().candle.close,101);assert.equal(hub.snapshot().connection.outOfOrderEvents,2);
+  }finally{hub.close();}
+});
+test('snapshot e emitido em ate 100ms sem enviar lote para cada negocio',t=>{
+  t.mock.timers.enable({apis:['setInterval']});FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});const events=[];
+  try{hub.start();hub.addClient(event=>events.push(event));events.length=0;const socket=FakeSocket.instances[1];socket.open();
+    for(let a=1;a<=50;a++)socket.message({data:{e:'aggTrade',s:'BTCUSDT',a,T:clock.now(),p:String(100+a),q:'1',m:false}});
+    t.mock.timers.tick(99);assert.equal(events.length,0);t.mock.timers.tick(1);assert.equal(events.length,1);assert.equal(events[0].data.ticker.last,150);
+  }finally{hub.close();t.mock.timers.reset();}
+});
+test('mensagem recem recebida nao torna uma cotacao antiga fresca',()=>{
+  FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message({data:{e:'aggTrade',s:'BTCUSDT',a:1,T:clock.now()-11000,p:'100',q:'1',m:false}});
+    assert.equal(hub.priceDatums().BTCUSDT,undefined);assert.equal(hub.snapshot().freshness.ticker.stale,true);assert.equal(hub.snapshot().stale,true);
+  }finally{hub.close();}
+});
 
 test("radar ignora pares fora do contrato sem interromper os itens validos do lote",()=>{
   FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:["wss://test"],WebSocketImpl:FakeSocket,clock});const seen=[],warnings=[];
