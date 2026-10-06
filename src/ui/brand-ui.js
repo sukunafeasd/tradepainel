@@ -12,6 +12,11 @@ const follow=document.getElementById('chartFollow');
 if(follow)follow.replaceChildren(createIcon('Activity',16),document.createTextNode('Ao vivo'));
 const search=document.querySelector('.search span');
 if(search)search.replaceChildren(createIcon('Search',18));
+const tabs={reading:'TrendingUp',flow:'Activity',risk:'Gauge',paper:'PackageCheck',alerts:'Activity',ai:'Bot'};
+for(const button of document.querySelectorAll('#tabs button')){
+  const label=button.textContent.trim();
+  button.replaceChildren(createIcon(tabs[button.dataset.tab],16),document.createTextNode(label));
+}
 
 const modal=document.getElementById('settingsModal');
 const backgrounds=[document.querySelector('.topbar'),document.querySelector('.shell')];

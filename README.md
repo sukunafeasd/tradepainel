@@ -55,6 +55,8 @@ O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, s
   historico preserva seu indice em memoria.
 - Controles, seletores, feedback e formularios seguem os cinco temas; foco do
   radar e mantido durante atualizacoes e as escalas ajustam a densidade das linhas.
+- Acabamento visual alinhado ao Painel Dief: superficies neutras, trilha de luz,
+  navegacao com icones, tipografia legivel e formularios com hierarquia uniforme.
 - Regressao automatizada inclui respostas lentas, recuperacao e estados da interface.
 
 ## Versão 0.9.1

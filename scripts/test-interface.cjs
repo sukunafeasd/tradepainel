@@ -42,6 +42,12 @@ const credentials={status:()=>({configured:false,encryptionAvailable:true}),load
           assert.equal(await page.locator(`#tab-${tab}`).isVisible(),true);
           assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${theme}/${tab}/${size.width}: overflow`);
         }
+        assert.equal(await page.locator('#tabs button svg').count(),6);
+        if(size.width===1540||size.width===480){
+          await page.locator('[data-tab="reading"]').click();
+          await page.evaluate(()=>window.scrollTo(0,0));
+          await page.screenshot({path:path.join(os.tmpdir(),`dieftrade-${theme}-${size.width}.png`)});
+        }
       }
     }
     await page.setViewportSize({width:1540,height:960});
