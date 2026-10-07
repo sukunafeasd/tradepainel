@@ -1,7 +1,7 @@
 {
   "name": "dieftrade",
   "productName": "DiefTrade",
-  "version": "0.9.3",
+  "version": "0.9.5",
   "description": "Assistente profissional de leitura de mercado e paper trading para day trade de criptomoedas.",
   "author": "Equipe Dief",
   "license": "UNLICENSED",
@@ -21,6 +21,8 @@
     "check": "pnpm run check:static && node --test tests/*.test.cjs",
     "audit:prod": "pnpm audit --prod --audit-level high",
     "build": "electron-builder --win portable",
+    "build:installer": "electron-builder --win nsis",
+    "build:all": "electron-builder --win portable nsis",
     "build:dir": "electron-builder --dir"
   },
   "dependencies": {
@@ -36,21 +38,21 @@
   "build": {
     "appId": "br.com.dief.trade",
     "productName": "DiefTrade",
-    "artifactName": "DiefTrade-${version}-${arch}.${ext}",
+    "artifactName": "DiefTrade.${ext}",
     "asar": true,
+    "electronLanguages": ["pt-BR", "en-US"],
+    "nsis": { "artifactName": "DiefTrade-Instalar.${ext}", "oneClick": true, "perMachine": false, "deleteAppDataOnUninstall": false },
     "afterPack": "scripts/after-pack.cjs",
     "files": [
       "src/**/*",
-      "assets/**/*",
-      "!assets/brand/dieftrade-coin.png",
+      "assets/brand/dieftrade.ico",
+      "assets/licenses/**/*",
       "scripts/smoke-runner.cjs",
       "package.json"
     ],
     "win": {
       "icon": "assets/brand/dieftrade.ico",
-      "target": [
-        "portable"
-      ],
+      "target": ["portable", "nsis"],
       "legalTrademarks": "DiefTrade"
     }
   }

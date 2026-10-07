@@ -28,6 +28,13 @@ const credentials={status:()=>({configured:false,encryptionAvailable:true}),load
     page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${port}/#t=${token}`);
     await page.waitForFunction(()=>document.getElementById('coinCount').textContent==='2'&&document.getElementById('signal').textContent!=='ANALISANDO');
+    assert.equal(await page.locator('#coinList > *').count(),2,'Loading placeholders must be removed');
+    assert.equal(await page.evaluate(()=>{
+      const row=document.querySelector('[data-symbol="BTCUSDT"]');row.focus();
+      state.coins=state.coins.map(c=>c.symbol==='BTCUSDT'?{...c,last:50001}:c);renderCoins();
+      return row===document.querySelector('[data-symbol="BTCUSDT"]')&&document.activeElement===row;
+    }),true,'Price updates must preserve the actual row and focus');
+    assert.equal(await page.locator('[data-symbol="BTCUSDT"] .last').textContent(),'50.001');
     const last=await page.evaluate(()=>state.analysis.series.candles.at(-1).t);
     const candle={t:last+900000,open:50000,high:50010,low:49990,close:50010,volume:20,closed:false};
     realtime.publish({...realtime.snapshot(),candle});

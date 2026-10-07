@@ -58,6 +58,7 @@ class RealtimeHub extends EventEmitter {
     this.lastMarketEventMono = 0;
     this.marketOpenedMono = 0;
     this.symbolOpenedMono = 0;
+    this.lastOfficialCandleMono = 0;
     this.lastSymbolEventMono = 0;
     this.clients = new Set();
     this.metrics = { reconnects: 0, marketReconnects: 0, alertReconnects: 0, alertStreams: 0, connectedAt: null, lastDisconnectAt: null, lastError: null, symbolHost: null, marketHost: null, alertHost: null, malformedEvents: 0, rejectedTimestamps: 0, outOfOrderEvents: 0, duplicateTrades: 0, generation: 0, snapshotIntervalMs: SNAPSHOT_INTERVAL_MS };
@@ -234,7 +235,7 @@ class RealtimeHub extends EventEmitter {
     this.socket = socket;
     socket.on("open", () => {
       if (generation !== this.symbolGeneration || socket !== this.socket) return;
-      this.retry = 0; this.symbolOpenedMono = performance.now(); this.metrics.connectedAt = this.clock.now(); this.metrics.symbolHost = host; this.metrics.lastError = null;
+      this.retry = 0; this.symbolOpenedMono = performance.now(); this.lastOfficialCandleMono = 0; this.metrics.connectedAt = this.clock.now(); this.metrics.symbolHost = host; this.metrics.lastError = null;
     });
     socket.on("message", (raw) => this.#handleMessage(raw, { socket, generation, symbol: selectedSymbol, interval: selectedInterval }));
     socket.on("close", () => {
@@ -354,6 +355,7 @@ class RealtimeHub extends EventEmitter {
           candle.close = this.state.ticker.last; candle.high = Math.max(candle.high, candle.close); candle.low = Math.min(candle.low, candle.close);
           if(previous?.t===candle.t){candle.high=Math.max(candle.high,previous.high);candle.low=Math.min(candle.low,previous.low);}
         }
+        this.lastOfficialCandleMono = receivedMono;
         this.#fresh("candle", eventTime, receivedAt, receivedMono); accepted = true;
       } else if (data.e === "aggTrade") {
         if (String(data.s || "").toUpperCase() !== context.symbol) return;
@@ -445,6 +447,8 @@ class RealtimeHub extends EventEmitter {
     if (stale !== this.state.stale) { this.state.stale = stale; changed = true; }
     const symbolActivity = this.lastSymbolEventMono || this.symbolOpenedMono;
     if (this.socket?.readyState === this.WebSocketImpl.OPEN && symbolActivity && nowMono - symbolActivity > SYMBOL_SILENCE_RECONNECT_MS) { const socket = this.socket; this.metrics.lastError = "Fluxo aberto sem nenhuma mensagem válida; reconectando."; try { socket.terminate(); } catch {} }
+    const candleActivity = this.lastOfficialCandleMono || this.symbolOpenedMono;
+    if (this.socket?.readyState === this.WebSocketImpl.OPEN && candleActivity && nowMono - candleActivity > SYMBOL_SILENCE_RECONNECT_MS) { this.metrics.lastError = "Velas oficiais interrompidas; reconectando fluxo parcial."; try { this.socket.terminate(); } catch {} }
     const marketActivity = this.lastMarketEventMono || this.marketOpenedMono;
     if (this.marketSocket?.readyState === this.WebSocketImpl.OPEN && marketActivity && nowMono - marketActivity > 20000) { this.metrics.lastError = "Radar aberto sem miniTicker; reconectando."; try { this.marketSocket.terminate(); } catch {} }
     for (const [symbol, item] of this.market) if (nowMono - item.receivedMono > 5 * 60 * 1000) this.market.delete(symbol);

@@ -78,6 +78,10 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   let shadowSettlementRunning = false;
   let alertMonitorRunning = false;
   let listening = false;
+  let coinRefresh = null;
+  let coinRefreshTask = null;
+  let cachedCoins = [];
+  let coinRefreshAt = -Infinity;
   const alertMonitorMetrics = { targetsActive: 0, targetsQueued: 0, oldestCheckAgeMs: 0, averageCheckIntervalMs: 0, maxCheckLagMs: 0, monitorCycleMs: 0, checks: 0, lastChecks: new Map() };
 
   const ALERT_ANALYSIS_INTERVAL_MS = 15000;
@@ -86,6 +90,22 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   const ALERT_ANALYSIS_CONCURRENCY = 4;
 
   const log = (level, event, details = {}) => { try { (logger[level] || logger.log).call(logger, JSON.stringify({ level, event, at: clock.now(), ...details })); } catch {} };
+  const refreshCoinCache = () => {
+    if (!listening || coinRefreshTask || performance.now() - coinRefreshAt < 30000) return;
+    coinRefreshAt = performance.now();
+    coinRefreshTask = Promise.resolve().then(() => marketClient.topPairs("USDT", 500))
+      .then(rows => { if (listening) cachedCoins = rows; })
+      .catch(error => { if (listening) log("warn", "coins_rest_degraded", { message: error.message }); })
+      .finally(() => { coinRefreshTask = null; });
+  };
+  const coinSnapshot = (limit) => {
+    const rows = new Map(cachedCoins.map(row => [row.symbol, row]));
+    for (const row of live.marketSnapshot(limit)) {
+      const previous = rows.get(row.symbol);
+      rows.set(row.symbol, !previous || Number(row.eventTime || 0) >= Number(previous.eventTime || 0) ? { ...previous, ...row } : previous);
+    }
+    return [...rows.values()].sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, limit);
+  };
   const origin = () => `http://127.0.0.1:${server?.address()?.port || 0}`;
   const securityHeaders = (contentType = null) => ({ ...(contentType ? { "Content-Type": contentType } : {}), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cross-Origin-Resource-Policy": "same-origin", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
   const json = (res, status, value) => { const payload = JSON.stringify(value); res.writeHead(status, { ...securityHeaders("application/json; charset=utf-8"), "Content-Length": Buffer.byteLength(payload) }); res.end(payload); };
@@ -287,16 +307,15 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     }
     if (pathname === "/api/bootstrap") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
-      let coins = live.marketSnapshot();
-      try { const rest = await marketClient.topPairs("USDT", 220); coins = [...new Map([...rest, ...coins].map((item) => [item.symbol, item])).values()].sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, 220); }
-      catch (error) { log("warn", "bootstrap_rest_degraded", { message: error.message }); }
+      refreshCoinCache();
+      const coins = coinSnapshot(220);
       return json(res, 200, { degraded: !coins.length, coins, selected: { symbol: live.symbol, interval: live.interval }, paper: paper.snapshot(priceDatums(), clock.now()), alerts: alerts.list(), journal: journal.page({ limit: 25 }), ai: credentialStore.status(), calibration: calibrator.status(), signals: lifecycle.current() });
     }
     if (pathname === "/api/coins") {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
-      const limit = cleanLimit(url.searchParams.get("limit"), 180, 500); let coins = live.marketSnapshot(limit);
-      try { const rest = await marketClient.topPairs("USDT", limit); coins = [...new Map([...rest, ...coins].map((item) => [item.symbol, item])).values()].sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, limit); } catch (error) { if (!coins.length) throw error; }
-      return json(res, 200, coins);
+      const limit = cleanLimit(url.searchParams.get("limit"), 180, 500);
+      refreshCoinCache();
+      return json(res, 200, coinSnapshot(limit));
     }
     if (pathname === "/api/live/select") {
       if (req.method !== "POST") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
@@ -416,14 +435,16 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     listen(port = 0) {
       return new Promise((resolve, reject) => {
         server.once("error", reject);
-        server.listen(port, "127.0.0.1", async () => {
+        server.listen(port, "127.0.0.1", () => {
           server.removeListener("error", reject); listening = true;
-          try { await marketClient.syncClock?.(); } catch (error) { log("warn", "clock_sync_failed", { message: error.message }); }
+          void Promise.resolve().then(() => marketClient.syncClock?.()).catch(error => { if (listening) log("warn", "clock_sync_failed", { message: error.message }); });
+          refreshCoinCache(); coinRefresh = setInterval(refreshCoinCache, 30000); coinRefresh.unref?.();
           live.start(); syncAlertPriceSubscriptions(); settlementTimer = setInterval(() => { paper.updatePrices(priceDatums(), clock.now()); void settleDue(); void settleShadowDue(); }, 1000); settlementTimer.unref?.(); alertMonitorTimer = setInterval(() => void monitorAnalysisAlerts(), 2500); alertMonitorTimer.unref?.(); void settleDue(); void settleShadowDue(); void monitorAnalysisAlerts(); resolve({ port: server.address().port, token });
         });
       });
     },
     async close() {
+      if (coinRefresh) clearInterval(coinRefresh); coinRefresh = null;
       listening = false; if (settlementTimer) clearInterval(settlementTimer); if (alertMonitorTimer) clearInterval(alertMonitorTimer); settlementTimer = null; alertMonitorTimer = null;
       live.off?.("price", onPrice); live.off?.("market-price", onMarketPrice); live.off?.("alert-price", onAlertPrice); live.close(); marketClient.close?.();
       for (const entry of sseResponses) { clearInterval(entry.keepAlive); entry.remove(); entry.writer?.close(); try { entry.res.end(); } catch {} } sseResponses.clear();

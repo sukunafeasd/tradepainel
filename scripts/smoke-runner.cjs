@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 
-async function runSmoke(mainWindow, environment = process.env) {
+async function runSmoke(mainWindow, environment = process.env, startupTimings = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) throw new Error("Janela indisponível para o teste visual.");
   const screenshotFile = environment.DIEFTRADE_SMOKE_SCREENSHOT;
   if (!screenshotFile) throw new Error("DIEFTRADE_SMOKE_SCREENSHOT não foi informado.");
@@ -13,7 +13,16 @@ async function runSmoke(mainWindow, environment = process.env) {
     document.querySelector('[data-theme="midnight"]')?.click();
     const input=document.getElementById('paperQty');
     if(input){input.value='100';input.dispatchEvent(new Event('input',{bubbles:true}));}
-    if(bootstrapReady&&marketOnline){document.getElementById('paperForm')?.requestSubmit();await waitUntil(()=>/Entrada confirmada/.test(document.getElementById('paperMessage')?.textContent||'')||/indisponível|Falha|erro/i.test(document.getElementById('paperMessage')?.textContent||''),15000);}
+    if(bootstrapReady&&marketOnline){
+      for(let attempt=0;attempt<3;attempt++){
+        const fresh=await waitUntil(()=>state.live?.freshness?.ticker&&!state.live.freshness.ticker.stale&&state.live.freshness.ticker.ageMs<1800,10000);
+        if(!fresh)break;
+        document.getElementById('paperForm')?.requestSubmit();
+        await waitUntil(()=>/Entrada confirmada|indisponível|Falha|erro/i.test(document.getElementById('paperMessage')?.textContent||''),15000);
+        if(/^Entrada confirmada/.test(document.getElementById('paperMessage')?.textContent||''))break;
+        if(!/Preço de entrada fresco indisponível/.test(document.getElementById('paperMessage')?.textContent||''))break;
+      }
+    }
     document.querySelector('[data-tab="paper"]')?.click();
     await new Promise(r=>setTimeout(r,150));
     const health=await api('/api/health'),live=health.live;
@@ -36,6 +45,7 @@ async function runSmoke(mainWindow, environment = process.env) {
     };
   })()`);
   result.ok = Boolean(result.bootstrapReady && result.marketOnline && result.liveBookLevels >= 2 && result.liveBookFresh && result.liveQuoteFresh && /^Entrada confirmada/.test(result.paperMessage) && result.coinCount > 0 && result.price !== "--" && result.chartTools >= 5 && result.simStats >= 5 && result.healthItems >= 8);
+  result.startup = startupTimings;
   if (environment.DIEFTRADE_SMOKE_REPORT) fs.writeFileSync(environment.DIEFTRADE_SMOKE_REPORT, JSON.stringify(result, null, 2));
   const image = await mainWindow.webContents.capturePage();
   fs.writeFileSync(screenshotFile, image.toPNG());

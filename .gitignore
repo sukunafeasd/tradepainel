@@ -1,7 +1,10 @@
 node_modules/
 dist/
+release/
 coverage/
 .codex-tmp/
+__pycache__/
+*.pyc
 .env
 .env.*
 *.log

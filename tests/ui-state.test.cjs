@@ -13,6 +13,10 @@ function harness(extra={}){
   vm.runInContext(source,context);
   return{context,run:code=>vm.runInContext(code,context)};
 }
+test('radar preserva preco mais recente quando REST atrasado chega depois',()=>{
+  const h=harness();h.run('mergeCoins([{symbol:"BTCUSDT",last:110,eventTime:200,quoteVolume:50,live:true}]);mergeCoins([{symbol:"BTCUSDT",last:100,eventTime:100,quoteVolume:60,live:false},{symbol:"ETHUSDT",last:10,eventTime:100,quoteVolume:20}]);');
+  assert.equal(h.run('state.coins.find(row=>row.symbol==="BTCUSDT").last'),110);assert.equal(h.run('state.coins.length'),2);assert.equal(h.run('state.coins[0].live'),true);
+});
 test('dados ausentes nao sao formatados como zero',()=>{const h=harness();for(const fn of ['fmt','money','pct','priceFormat']){assert.equal(h.run(`${fn}(null)`),'--');assert.equal(h.run(`${fn}(undefined)`),'--');assert.equal(h.run(`${fn}("")`),'--');}assert.equal(h.run('fmt(0)'),'0');assert.equal(h.run('pct(0)'),'+0.00%');});
 test('preco pequeno nao e arredondado para zero no grafico',()=>{const h=harness();assert.notEqual(h.run('priceNumber(0.000000125)'),'0');assert.equal(h.run('priceNumber(0.000000125)'),'0,000000125');});
 test('entrada expira localmente mesmo com requisicao pendente e relogio diferente',()=>{let mono=0;const h=harness({performance:{now:()=>mono}});h.run('renderEntry({status:"READY",direction:"COMPRA",checkedAt:1800000000000,expiresAt:1800000030000});state.entryPending=true;');mono=2001;h.run('expireEntryView()');assert.equal(h.run('state.entryView.value.status'),'WAIT');assert.match(h.run('$("entryReason").textContent'),/revalidada/);});
@@ -32,6 +36,19 @@ test('virada de periodo preserva velas recebidas antes do proximo REST',()=>{
 test('redesenhos sao consolidados em um frame sem cancelar o anterior',()=>{
   const frames=[];const h=harness({requestAnimationFrame:cb=>{frames.push(cb);return frames.length;}});
   h.run('drawChart=()=>{};requestChart();requestChart();requestChart();');assert.equal(frames.length,1);frames[0]();h.run('requestChart()');assert.equal(frames.length,2);
+});
+test('janela oculta nao agenda desenho de canvas',()=>{
+  let frames=0;const h=harness({document:{hidden:true},requestAnimationFrame:()=>++frames});
+  h.run('requestChart();requestChart();');assert.equal(frames,0);
+});
+test('book e tape identicos nao reescrevem DOM',()=>{
+  const writes={book:0,tape:0};const nodes={};
+  for(const id of Object.keys(writes))nodes[id]={set innerHTML(value){writes[id]++;}};
+  const h=harness({document:{getElementById:id=>nodes[id]}});
+  h.run('renderBook({bids:[[100,1]],asks:[[101,2]]});renderBook({bids:[[100,1]],asks:[[101,2]]});renderTape([{price:100,quantity:1,side:"buy",t:1}]);renderTape([{price:100,quantity:1,side:"buy",t:1}]);');
+  assert.deepEqual(writes,{book:1,tape:1});
+  h.run('renderBook({bids:[[100,2]],asks:[[101,2]]});renderTape([]);');
+  assert.deepEqual(writes,{book:2,tape:2});
 });
 test('historico confirmado nao e substituido por vela provisoria antiga',()=>{const h=harness();h.run('state.analysis={series:{candles:[{t:2,close:105,closed:true}]}};state.liveCandles=[{t:2,close:99,closed:false}];');assert.equal(h.run('displayCandles()[0].close'),105);});
 test('snapshot sem mudanca na vela nao solicita outro redraw',()=>{const h=harness();h.run('let paints=0;requestChart=()=>{paints++};const candle={t:1,open:100,high:101,low:99,close:100,volume:10,closed:false};mergeLiveCandle(candle);mergeLiveCandle({...candle});');assert.equal(h.run('paints'),1);h.run('mergeLiveCandle({...candle,close:101})');assert.equal(h.run('paints'),2);});

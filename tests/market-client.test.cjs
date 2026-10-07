@@ -1,6 +1,35 @@
 "use strict";
 const test=require("node:test");const assert=require("node:assert/strict");const {MarketClient}=require("../src/engine/market-client.cjs");
 
+test('relogio prefere amostra rapida apos conexao inicial lenta',async()=>{
+  let calls=0,observed;
+  const client=new MarketClient({clock:{sync:(remote,timing)=>{observed={remote,...timing};return{};}}});
+  client.get=async(_path,_params,_ttl,options)=>{calls++;Object.assign(options.timing,calls===1?{requestStartedMono:100,responseReceivedMono:1100}:{requestStartedMono:1200,responseReceivedMono:1210});return{serverTime:calls===1?100000:101000};};
+  await client.syncClock();assert.equal(calls,2);assert.equal(observed.remote,101000);assert.equal(observed.responseReceivedMono-observed.requestStartedMono,10);
+});
+test('falha na segunda amostra preserva horario remoto valido',async()=>{
+  let calls=0,remote;
+  const client=new MarketClient({clock:{sync:(value)=>{remote=value;return{};}}});
+  client.get=async(_path,_params,_ttl,options)=>{if(++calls===2)throw new Error('offline');Object.assign(options.timing,{requestStartedMono:100,responseReceivedMono:1100});return{serverTime:100000};};
+  await client.syncClock();assert.equal(remote,100000);
+});
+
+test('sincronizacao do relogio exclui atraso de hosts que falharam',async()=>{
+  const original=global.fetch;let observed;
+  global.fetch=async(url)=>{if(url.startsWith('https://bad')){await new Promise(resolve=>setTimeout(resolve,50));throw new Error('offline');}return{ok:true,status:200,json:async()=>({serverTime:Date.now()})};};
+  try{
+    const clock={now:()=>Date.now(),sync:(remote,timing)=>{observed=timing;return{};}};
+    const client=new MarketClient({hosts:['https://bad','https://good'],clock});await client.syncClock();
+    assert.ok(client.lastTotalLatency>=45);assert.ok(observed.responseReceivedMono-observed.requestStartedMono<client.lastTotalLatency-30);
+  }finally{global.fetch=original;}
+});
+
+test('radar REST usa horario do snapshot e nao transforma cache antigo em preco novo',async()=>{
+  const client=new MarketClient({clock:{now:()=>10000}});client.exchangeInfo=async()=>new Map();
+  client.get=async()=>[{symbol:'BTCUSDT',lastPrice:'100',priceChangePercent:'1',quoteVolume:'1000',volume:'10',highPrice:'101',lowPrice:'99',count:'3',closeTime:5000}];
+  const rows=await client.topPairs();assert.equal(rows[0].eventTime,5000);assert.equal(rows[0].receivedAt,10000);
+});
+
 test("erro 400 determinístico não percorre todos os hosts",async()=>{const original=global.fetch;let calls=0;global.fetch=async()=>{calls+=1;return{ok:false,status:400,headers:new Headers(),text:async()=>"bad"};};try{const client=new MarketClient({hosts:["https://a.test","https://b.test"]});await assert.rejects(()=>client.get("/bad"),/HTTP 400/);assert.equal(calls,1);}finally{global.fetch=original;}});
 
 test("failover aprende host saudável e mede latência total",async()=>{const original=global.fetch,calls=[];global.fetch=async(url)=>{calls.push(url);if(url.startsWith("https://bad"))throw new Error("offline");return{ok:true,status:200,headers:new Headers(),json:async()=>({ok:true})};};try{const client=new MarketClient({hosts:["https://bad","https://good"],timeout:500,totalTimeout:2000});assert.deepEqual(await client.get("/ok",{},0),{ok:true});assert.equal(client.status().host,"https://good");await client.get("/next",{},0);assert.match(calls.at(-1),/^https:\/\/good/);assert.ok(client.status().totalLatencyMs>=0);}finally{global.fetch=original;}});

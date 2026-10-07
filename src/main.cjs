@@ -1,9 +1,11 @@
 "use strict";
 
+const startupAt = performance.now();
 const path = require("path");
 const { app, BrowserWindow, shell, safeStorage } = require("electron");
 const { createServer } = require("./server.cjs");
 const { CredentialStore } = require("./security/credential-store.cjs");
+const startupTimings = { modulesReadyMs: Math.round(performance.now() - startupAt) };
 
 const allowedExternal = new Set([
   "https://platform.openai.com/api-keys",
@@ -65,13 +67,19 @@ async function createMainWindow() {
   window.webContents.on("render-process-gone", (_event, details) => {
     if (!quitting && details.reason !== "clean-exit") void window.loadURL(`${localOrigin}/#t=${encodeURIComponent(token)}`);
   });
-  window.once("ready-to-show", () => { window.show(); window.focus(); focusRequested = false; });
+  window.once("ready-to-show", () => {
+    startupTimings.windowReadyMs = Math.round(performance.now() - startupAt);
+    const launchedAt = Number(process.env.DIEFTRADE_SMOKE_STARTED_AT);
+    if (process.env.DIEFTRADE_SMOKE_SCREENSHOT && Number.isFinite(launchedAt) && launchedAt > 0) startupTimings.portableToWindowMs = Math.max(0, Date.now() - launchedAt);
+    window.show(); window.focus(); focusRequested = false;
+  });
   window.on("closed", () => { if (mainWindow === window) mainWindow = null; });
   await window.loadURL(`${localOrigin}/#t=${encodeURIComponent(token)}`);
   return window;
 }
 
 async function start() {
+  startupTimings.electronReadyMs = Math.round(performance.now() - startupAt);
   const dataDirectory = path.join(app.getPath("userData"), "dieftrade-data");
   const credentialStore = new CredentialStore(dataDirectory, safeStorage);
   localServer = createServer({
@@ -80,11 +88,12 @@ async function start() {
     credentialStore,
   });
   localAddress = await localServer.listen();
+  startupTimings.localReadyMs = Math.round(performance.now() - startupAt);
   await createMainWindow();
   if (process.env.DIEFTRADE_SMOKE_SCREENSHOT) {
     // Mantido no pacote para validar exatamente o mesmo artefato entregue ao usuário.
     const { runSmoke } = require("../scripts/smoke-runner.cjs");
-    await runSmoke(mainWindow, process.env);
+    await runSmoke(mainWindow, process.env, startupTimings);
     app.quit();
   }
 }

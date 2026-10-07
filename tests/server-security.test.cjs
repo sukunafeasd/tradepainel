@@ -15,6 +15,22 @@ class FakeLive {
 }
 const credentials={status:()=>({configured:false,encryptionAvailable:true}),load:()=>({apiKey:"",model:"gpt-5"}),save:()=>({configured:true}),remove:()=>({configured:false})};
 
+test('abertura e bootstrap nao aguardam bolsa lenta e REST antigo nao recua preco',async()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dieftrade-fast-start-'));
+  let releaseClock,releaseCoins,calls=0;
+  const clockWait=new Promise(resolve=>releaseClock=resolve),coinsWait=new Promise(resolve=>releaseCoins=resolve);
+  const live=new FakeLive();live.marketSnapshot=()=>[{symbol:'BTCUSDT',last:51000,eventTime:200,quoteVolume:1e9}];
+  const market={status:()=>({ok:true}),syncClock:()=>clockWait,topPairs:()=>{calls++;return coinsWait;},klines:async()=>[]};
+  const app=createServer({dataDirectory:dir,uiDirectory:dir,credentialStore:credentials,market,realtime:live});
+  try{
+    const {port,token}=await Promise.race([app.listen(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('startup blocked by market')),1000).unref())]);
+    const get=route=>fetch(`http://127.0.0.1:${port}${route}`,{headers:{'X-Dief-Token':token},signal:AbortSignal.timeout(1000)}).then(response=>response.json());
+    const data=await get('/api/bootstrap');assert.equal(data.coins[0].last,51000);assert.equal(calls,1);
+    releaseCoins([{symbol:'BTCUSDT',last:49000,eventTime:100,quoteVolume:1e9}]);await new Promise(resolve=>setImmediate(resolve));
+    const rows=await get('/api/coins');assert.equal(rows[0].last,51000);assert.equal(calls,1);
+  }finally{releaseClock();releaseCoins([]);await app.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 test('mudanca lenta de mercado nao sobrescreve configuracao mais recente',async()=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dieftrade-select-race-')),live=new FakeLive();let release,started;
   const slow=new Promise(r=>release=r),entered=new Promise(r=>started=r);

@@ -1,10 +1,11 @@
-param([string]$Version)
+param([string]$Version, [string]$Notes)
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 $project=Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
 if(!$Version){$Version=$project.version}
+if(!$Notes){$Notes="DiefTrade $Version. Consulte o CHANGELOG.md do repositorio para as alteracoes desta versao. Sem ordens reais. Sem certificado Authenticode publico."}
 if($Version -ne $project.version -or $Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version mismatch'}
-$name="DiefTrade-$Version-x64.exe"
+$name="DiefTrade.exe"
 $file=Get-Item -LiteralPath (Join-Path $root "dist/$name")
 if($file.Length -lt 1000000){throw 'Invalid release artifact'}
 $hash=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -17,7 +18,7 @@ foreach($line in $credential){if($line -match '^([^=]+)=(.*)$'){$fields[$Matches
 if(!$fields.password){throw 'GitHub credential unavailable'}
 $headers=@{Authorization=('Bearer '+$fields.password);'User-Agent'='DiefTrade-Release';Accept='application/vnd.github+json'}
 $base='https://api.github.com/repos/sukunafeasd/tradepainel'
-$release=Invoke-RestMethod "$base/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body (@{tag_name="v$Version";target_commitish=(git -C $root rev-parse HEAD).Trim();name="DiefTrade $Version";draft=$true;prerelease=$false;body='Identidade da Equipe Dief, icone oficial, cinco temas refinados, controles Lucide e layout adaptativo. Foco e rolagem das configuracoes corrigidos. Radar WebSocket ignora pares fora do contrato sem interromper os validos. Simulador busca cotacao fresca quando o radar ultrapassa o limite de entrada, sem relaxar a validacao. Credenciais protegidas e dados preservados. 75 testes automatizados, verificacao de interface e teste do executavel com mercado ao vivo. Sem ordens reais. Sem certificado Authenticode publico.'}|ConvertTo-Json)
+$release=Invoke-RestMethod "$base/releases" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body (@{tag_name="v$Version";target_commitish=(git -C $root rev-parse HEAD).Trim();name="DiefTrade $Version";draft=$true;prerelease=$false;body=$Notes}|ConvertTo-Json)
 Add-Type -AssemblyName System.Net.Http
 $client=New-Object System.Net.Http.HttpClient
 $client.Timeout=[TimeSpan]::FromMinutes(30)

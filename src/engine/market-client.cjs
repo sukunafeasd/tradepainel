@@ -44,7 +44,7 @@ class MarketClient {
     while (this.cache.size > this.cacheLimit) this.cache.delete(this.cache.keys().next().value);
   }
 
-  async get(pathname, params = {}, ttl = 0, { force = false } = {}) {
+  async get(pathname, params = {}, ttl = 0, { force = false, timing = null } = {}) {
     if (this.closed) throw new AppError("Cliente de mercado encerrado.", { status: 503, code: "MARKET_CLIENT_CLOSED" });
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null)).toString();
     const requestPath = query ? `${pathname}?${query}` : pathname;
@@ -52,7 +52,7 @@ class MarketClient {
       const cached = this.#cacheGet(requestPath);
       if (cached != null) return cached;
     }
-    if (force) { const value = await this.#fetchFailover(requestPath); this.#cachePut(requestPath, value, ttl); return structuredClone(value); }
+    if (force) { const value = await this.#fetchFailover(requestPath, timing); this.#cachePut(requestPath, value, ttl); return structuredClone(value); }
     if (!force && this.inFlight.has(requestPath)) { const value = await this.inFlight.get(requestPath); this.#cachePut(requestPath, value, ttl); return structuredClone(value); }
     const task = this.#fetchFailover(requestPath).finally(() => this.inFlight.delete(requestPath));
     this.inFlight.set(requestPath, task);
@@ -61,7 +61,7 @@ class MarketClient {
     return structuredClone(value);
   }
 
-  async #fetchFailover(path) {
+  async #fetchFailover(path, timing = null) {
     const errors = [];
     const totalStarted = performance.now();
     const remainingCooldown = this.cooldownUntilMono - performance.now();
@@ -87,6 +87,7 @@ class MarketClient {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         let result;
         try { result = await response.json(); } catch (error) { throw new Error("A Binance retornou JSON inválido.", { cause: error }); }
+        if (timing) { timing.requestStartedMono = started; timing.responseReceivedMono = performance.now(); }
         this.preferredHostIndex = index;
         this.lastHost = host;
         this.lastLatency = Math.round(performance.now() - started);
@@ -108,9 +109,19 @@ class MarketClient {
   }
 
   async syncClock() {
-    const started = performance.now();
-    const value = await this.get("/api/v3/time", {}, 0, { force: true });
-    return this.clock.sync(finiteNumber(value.serverTime, "Horário da Binance"), { requestStartedMono: started, responseReceivedMono: performance.now() });
+    // Failed hosts are not part of the successful request's clock round trip.
+    let timing = {};
+    let value = await this.get("/api/v3/time", {}, 0, { force: true, timing });
+    let serverTime = finiteNumber(value.serverTime, "Horário da Binance");
+    if (timing.responseReceivedMono - timing.requestStartedMono > 750) {
+      const nextTiming = {};
+      try {
+        const next = await this.get("/api/v3/time", {}, 0, { force: true, timing: nextTiming });
+        const nextTime = finiteNumber(next.serverTime, "Horário da Binance");
+        if (nextTiming.responseReceivedMono - nextTiming.requestStartedMono < timing.responseReceivedMono - timing.requestStartedMono) { timing = nextTiming; serverTime = nextTime; }
+      } catch { /* Keep the valid first sample when the refinement fails. */ }
+    }
+    return this.clock.sync(serverTime, timing);
   }
 
   async serverTime() { return this.get("/api/v3/time", {}, 5000); }
@@ -146,7 +157,7 @@ class MarketClient {
         const base = symbol.slice(0, -quote.length);
         if (!symbol.endsWith(quote) || STABLES.has(base) || /(UP|DOWN|BULL|BEAR)$/.test(base) || (info.size && !info.has(symbol))) return null;
         const bid = Number(row.bidPrice); const ask = Number(row.askPrice); const mid = bid > 0 && ask >= bid ? (bid + ask) / 2 : null;
-        return { symbol, base, quote, last, changePct: finiteNumber(row.priceChangePercent, "Variação"), high: finiteNumber(row.highPrice, "Máxima", { min: 0 }), low: finiteNumber(row.lowPrice, "Mínima", { min: 0 }), volume: finiteNumber(row.volume, "Volume", { min: 0 }), quoteVolume, trades: finiteNumber(row.count, "Negócios", { min: 0 }), spreadHint: mid ? ((ask - bid) / mid) * 100 : null, eventTime: this.clock.now(), receivedAt: this.clock.now(), live: false };
+        return { symbol, base, quote, last, changePct: finiteNumber(row.priceChangePercent, "Variação"), high: finiteNumber(row.highPrice, "Máxima", { min: 0 }), low: finiteNumber(row.lowPrice, "Mínima", { min: 0 }), volume: finiteNumber(row.volume, "Volume", { min: 0 }), quoteVolume, trades: finiteNumber(row.count, "Negócios", { min: 0 }), spreadHint: mid ? ((ask - bid) / mid) * 100 : null, eventTime: Number(row.closeTime) || 0, receivedAt: this.clock.now(), live: false };
       } catch { return null; }
     }).filter(Boolean).sort((a, b) => b.quoteVolume - a.quoteVolume).slice(0, cleanLimitValue);
   }
