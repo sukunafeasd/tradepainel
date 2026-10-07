@@ -137,7 +137,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     let datum = priceDatums()[value.symbol];
     if (!datum) { try { datum = (await marketClient.ticker(value.symbol, { force: true })).datum; } catch {} }
     const evaluated = lifecycle.evaluate(value, datum, clock.now());
-    const final = { ...value, signalLifecycle: evaluated.current,entryAssessment:assessEntry(value,evaluated.current,datum,clock.now()) };
+    const final = { ...value, signalLifecycle: evaluated.current,entryAssessment:assessEntry(value,evaluated.current,datum,clock.now(),currentQuote(value.symbol)) };
     setLatestAnalysis(`${final.symbol}|${final.interval}`, final);
     for (const event of evaluated.events) {
       live.publish?.(event.type, event);
@@ -175,6 +175,11 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   };
 
   const priceDatums = () => live.priceDatums?.({ maxAgeMs: 5000 }) || {};
+  const currentQuote = symbol => {
+    const snapshot=live.snapshot(),fresh=snapshot.freshness?.quote;
+    if(snapshot.symbol!==symbol||!fresh||fresh.stale||!snapshot.connected)return null;
+    return {symbol,bid:snapshot.ticker?.bid,ask:snapshot.ticker?.ask,receivedAt:fresh.receivedAt,stale:false};
+  };
 
   async function settleDue() {
     if (!listening || settlementRunning) return [];
@@ -330,7 +335,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if(pathname==='/api/signals/entry'&&req.method==='GET'){
       const symbol=cleanSymbol(url.searchParams.get('symbol')),interval=cleanInterval(url.searchParams.get('interval'));
       const analysis=latestFinalAnalysis.get(`${symbol}|${interval}`)?.value;
-      return json(res,200,assessEntry(analysis,lifecycle.get(symbol,interval),priceDatums()[symbol],clock.now()));
+      return json(res,200,assessEntry(analysis,lifecycle.get(symbol,interval),priceDatums()[symbol],clock.now(),currentQuote(symbol)));
     }
     if (pathname === "/api/paper" && req.method === "GET") return json(res, 200, paper.snapshot(priceDatums(), clock.now()));
     if (pathname === "/api/paper/order" && req.method === "POST") {

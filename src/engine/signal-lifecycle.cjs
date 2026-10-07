@@ -66,6 +66,7 @@ function rebasePlan(plan, analysisPrice, confirmedPrice, direction) {
   const ratio = Number(confirmedPrice) / Number(analysisPrice);
   const scaled = (value) => Number.isFinite(Number(value)) ? Number((Number(value) * ratio).toPrecision(10)) : null;
   const next = { ...plan, entry: Number(confirmedPrice), stop: scaled(plan.stop), target1: scaled(plan.target1), target2: scaled(plan.target2), basedOn: "confirmed-market-price" };
+  if(Number.isFinite(plan.suggestedQuantity)&&plan.suggestedQuantity>=0){next.suggestedQuantity=plan.suggestedQuantity/ratio;next.notional=next.suggestedQuantity*Number(confirmedPrice);}
   const valid = direction === "COMPRA"
     ? next.stop < next.entry && next.target1 > next.entry && next.target2 > next.entry
     : next.stop > next.entry && next.target1 < next.entry && next.target2 < next.entry;

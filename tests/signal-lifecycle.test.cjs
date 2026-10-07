@@ -4,7 +4,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { SignalLifecycleStore } = require("../src/engine/signal-lifecycle.cjs");
+const { SignalLifecycleStore,rebasePlan } = require("../src/engine/signal-lifecycle.cjs");
+test('rebase da confirmacao preserva capital e risco nominal da quantidade',()=>{const plan=rebasePlan({entry:100,stop:98,target1:104,target2:106,suggestedQuantity:10},100,200,'COMPRA');assert.equal(plan.suggestedQuantity,5);assert.equal(plan.notional,1000);assert.equal(plan.suggestedQuantity*(plan.entry-plan.stop),20);});
 
 const base = (overrides = {}) => ({ id:`analysis-${Math.random()}`,symbol:"BTCUSDT",interval:"1m",signal:"COMPRA",score:40,threshold:30,confidence:80,calculatedAt:1_700_000_000_000,latestCandleCloseTime:1_700_000_000_000,marketDataAgeMs:100,dataQuality:{score:90},multiTimeframe:{status:"ready",coverage:100,alignment:75,signal:"COMPRA"},price:100,plan:{entry:100,stop:99,target1:101,target2:102},...overrides });
 const datum = (at, value = 100, stale = false) => ({symbol:"BTCUSDT",value,exchangeTimestamp:at,receivedAt:at,source:"aggTrade-test",stale});

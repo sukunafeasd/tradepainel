@@ -45,6 +45,13 @@ O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, s
 
 ## Versão 0.9.3
 
+- Entrada considera ask na compra e bid na venda, cotacoes com ate dois segundos
+  e risco/retorno tecnico ate o primeiro alvo. Plano revalidado preserva stop e
+  alvos e recalcula quantidade de referencia sem aumentar o risco nominal.
+- A indicacao READY expira tambem no cliente com relogio monotonicamente contado;
+  respostas lentas ou de selecoes anteriores nao mantem entrada aparentemente atual.
+- Desenhos de tendencia alinhados ao centro das velas, com conversao reversivel.
+
 - Velas com corpo delineado, volume separado, estado de formacao e precos pequenos
   preservados. Visual adaptado aos cinco temas.
 - Leitura em aguarde quando ha lacunas, dados atrasados, volume insuficiente,

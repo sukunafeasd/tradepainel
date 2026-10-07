@@ -2,8 +2,8 @@
 const {validateMarketDatum}=require('./contracts.cjs');
 
 // Conservative simulation guards, not a probability model or future schedule.
-function assessEntry(analysis, signal, datum, now=Date.now()) {
-  const result={status:'WAIT',direction:signal?.direction||null,confirmedAt:signal?.confirmedAt||null,confirmedPrice:signal?.confirmedPrice||null,checkedAt:now,expiresAt:null,currentPrice:null,reasons:[]};
+function assessEntry(analysis, signal, datum, now=Date.now(), quote=null) {
+  const result={status:'WAIT',direction:signal?.direction||null,confirmedAt:signal?.confirmedAt||null,confirmedPrice:signal?.confirmedPrice||null,checkedAt:now,expiresAt:null,currentPrice:null,executionPrice:null,estimatedRiskReward:null,plan:null,reasons:[]};
   const block=reason=>{result.reasons.push(reason);return result;};
   if(analysis?.decision?.blockers?.length)return block(analysis.decision.blockers.join(' '));
   if(!analysis||!signal||!/^CONFIRMED_(BUY|SELL)$/.test(signal.status))return block('Aguarde uma confirmação estável; direção técnica não é entrada.');
@@ -21,10 +21,22 @@ function assessEntry(analysis, signal, datum, now=Date.now()) {
   const plan=signal.confirmedPlan,atr=analysis.indicators?.atr,reference=signal.confirmedPrice;
   if(!plan||![plan.stop,plan.target1,atr,reference].every(v=>Number.isFinite(v)&&v>0))return block('Plano ou amplitude de mercado indisponíveis.');
   const buy=signal.direction==='COMPRA';
+  if(!quote||quote.symbol!==analysis.symbol||quote.stale||![quote.bid,quote.ask,quote.receivedAt].every(v=>Number.isFinite(v)&&v>0)||quote.bid>quote.ask||quote.receivedAt>now||now-quote.receivedAt>2000)return block('Melhor bid/ask indisponível ou atrasado.');
+  const execution=buy?quote.ask:quote.bid;
+  result.executionPrice=execution;
   if(!(buy?plan.stop<reference&&plan.target1>reference:plan.stop>reference&&plan.target1<reference))return block('Níveis do plano inconsistentes.');
-  if(buy?price.value<=plan.stop:price.value>=plan.stop)return block('Preço atingiu a invalidação do plano.');
-  if(buy?price.value>=plan.target1:price.value<=plan.target1)return block('Primeiro alvo já alcançado; não perseguir esta entrada.');
-  if(Math.abs(price.value-reference)>atr*.5)return block('Preço afastado mais de meio ATR da confirmação.');
+  if(buy?execution<=plan.stop:execution>=plan.stop)return block('Preço atingiu a invalidação do plano.');
+  if(buy?execution>=plan.target1:execution<=plan.target1)return block('Primeiro alvo já alcançado; não perseguir esta entrada.');
+  if(Math.abs(execution-reference)>atr*.5)return block('Preço afastado mais de meio ATR da confirmação.');
+  const risk=buy?execution-plan.stop:plan.stop-execution,reward=buy?plan.target1-execution:execution-plan.target1;
+  result.estimatedRiskReward=reward/risk;
+  if(!Number.isFinite(result.estimatedRiskReward)||result.estimatedRiskReward<1)return block('Distância até o primeiro alvo menor que o risco técnico atual.');
+  const secondReward=Number.isFinite(plan.target2)?(buy?plan.target2-execution:execution-plan.target2):null;
+  const nominalLimit=Number.isFinite(plan.notional)&&plan.notional>0?plan.notional:Infinity;
+  const riskLimit=Number.isFinite(plan.riskBudget)&&plan.riskBudget>=0?plan.riskBudget:Infinity;
+  const quantity=Number.isFinite(plan.suggestedQuantity)&&plan.suggestedQuantity>0?Math.min(plan.suggestedQuantity*Math.abs(reference-plan.stop),riskLimit)/risk:null;
+  const boundedQuantity=quantity==null?null:Math.min(quantity,nominalLimit/execution);
+  result.plan={...plan,entry:execution,riskReward1:result.estimatedRiskReward,riskReward2:secondReward>0?secondReward/risk:null,suggestedQuantity:boundedQuantity,notional:boundedQuantity==null?null:boundedQuantity*execution,basedOn:'live-quote',note:'Bid/ask observado; não inclui taxas, slippage ou garantia de execução.'};
   result.status='READY';result.reasons=['Condições técnicas mantidas para simulação; revalidar no momento da execução.'];
   return result;
 }

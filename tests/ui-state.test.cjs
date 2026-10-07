@@ -8,13 +8,16 @@ const {getEventListeners}=require("node:events");
 const source=fs.readFileSync(path.join(__dirname,"../src/ui/app.js"),"utf8").replace(/bootstrap\(\);\s*$/," ");
 function harness(extra={}){
   const elements=new Map();
-  const context=vm.createContext({console,AbortController,DOMException,setTimeout,clearTimeout,URLSearchParams,
+  const context=vm.createContext({console,AbortController,DOMException,setTimeout,clearTimeout,URLSearchParams,performance,
     document:{getElementById:id=>{if(!elements.has(id))elements.set(id,{textContent:"",className:"",style:{}});return elements.get(id);}},...extra});
   vm.runInContext(source,context);
   return{context,run:code=>vm.runInContext(code,context)};
 }
 test('dados ausentes nao sao formatados como zero',()=>{const h=harness();for(const fn of ['fmt','money','pct','priceFormat']){assert.equal(h.run(`${fn}(null)`),'--');assert.equal(h.run(`${fn}(undefined)`),'--');assert.equal(h.run(`${fn}("")`),'--');}assert.equal(h.run('fmt(0)'),'0');assert.equal(h.run('pct(0)'),'+0.00%');});
 test('preco pequeno nao e arredondado para zero no grafico',()=>{const h=harness();assert.notEqual(h.run('priceNumber(0.000000125)'),'0');assert.equal(h.run('priceNumber(0.000000125)'),'0,000000125');});
+test('entrada expira localmente mesmo com requisicao pendente e relogio diferente',()=>{let mono=0;const h=harness({performance:{now:()=>mono}});h.run('renderEntry({status:"READY",direction:"COMPRA",checkedAt:1800000000000,expiresAt:1800000030000});state.entryPending=true;');mono=2001;h.run('expireEntryView()');assert.equal(h.run('state.entryView.value.status'),'WAIT');assert.match(h.run('$("entryReason").textContent'),/revalidada/);});
+test('linha de tendencia usa centro exato da vela e coordenadas reversiveis',()=>{const h=harness();h.run('const m={pad:{l:12},cw:500,count:5,firstT:100,lastT:500};');assert.equal(h.run('chartTimeX(100,m)'),62);assert.equal(h.run('chartTimeX(500,m)'),462);assert.equal(h.run('chartXTime(chartTimeX(300,m),m)'),300);});
+test('plano mostrado acompanha avaliacao revalidada, nao o plano antigo',()=>{const h=harness();h.run('let seen;renderPlan=p=>seen=p;state.analysis={plan:{entry:99}};renderEntry({status:"READY",plan:{entry:100.01}})');assert.equal(h.run('seen.entry'),100.01);h.run('renderEntry({status:"WAIT"})');assert.equal(h.run('seen.entry'),99);});
 test('virada de periodo preserva velas recebidas antes do proximo REST',()=>{
   const h=harness();h.run('requestChart=()=>{};state.analysis={series:{candles:[{t:1,close:100}]}};');
   const candle={t:2,open:100,high:105,low:99,close:103,volume:5,closed:false};
