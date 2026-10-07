@@ -14,6 +14,7 @@ const { AiReader } = require("./engine/ai-reader.cjs");
 const { AdaptiveCalibrator } = require("./engine/adaptive-calibration.cjs");
 const { ExchangeClock } = require("./engine/clock.cjs");
 const { SignalLifecycleStore } = require("./engine/signal-lifecycle.cjs");
+const { assessEntry } = require("./engine/entry-assessment.cjs");
 const { AppError, cleanSymbol, cleanInterval, cleanLimit, plainObject, validateMarketDatum, ENTRY_PRICE_MAX_AGE_MS } = require("./engine/contracts.cjs");
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".png": "image/png", ".ico": "image/x-icon", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
@@ -136,7 +137,7 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     let datum = priceDatums()[value.symbol];
     if (!datum) { try { datum = (await marketClient.ticker(value.symbol, { force: true })).datum; } catch {} }
     const evaluated = lifecycle.evaluate(value, datum, clock.now());
-    const final = { ...value, signalLifecycle: evaluated.current };
+    const final = { ...value, signalLifecycle: evaluated.current,entryAssessment:assessEntry(value,evaluated.current,datum,clock.now()) };
     setLatestAnalysis(`${final.symbol}|${final.interval}`, final);
     for (const event of evaluated.events) {
       live.publish?.(event.type, event);
@@ -325,6 +326,11 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
     if ((match = pathname.match(/^\/api\/confluence\/([A-Za-z0-9]+)$/))) {
       if (req.method !== "GET") return fail(res, 405, "Método não permitido.", "METHOD_NOT_ALLOWED");
       return json(res, 200, await getConfluence(cleanSymbol(match[1]), cleanInterval(url.searchParams.get("interval") || live.interval)));
+    }
+    if(pathname==='/api/signals/entry'&&req.method==='GET'){
+      const symbol=cleanSymbol(url.searchParams.get('symbol')),interval=cleanInterval(url.searchParams.get('interval'));
+      const analysis=latestFinalAnalysis.get(`${symbol}|${interval}`)?.value;
+      return json(res,200,assessEntry(analysis,lifecycle.get(symbol,interval),priceDatums()[symbol],clock.now()));
     }
     if (pathname === "/api/paper" && req.method === "GET") return json(res, 200, paper.snapshot(priceDatums(), clock.now()));
     if (pathname === "/api/paper/order" && req.method === "POST") {

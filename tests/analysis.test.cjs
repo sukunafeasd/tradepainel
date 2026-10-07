@@ -73,3 +73,4 @@ test("plano técnico mantém alvos no lado correto mesmo sem níveis úteis", ()
   assert.ok(buy.target1 > buy.entry && buy.target2 > buy.entry && buy.stop < buy.entry);
   assert.ok(sell.target1 < sell.entry && sell.target2 < sell.entry && sell.stop > sell.entry);
 });
+test('filtros de qualidade bloqueiam historico antigo e volume fraco',()=>{const rows=candles(1,'1m');const latest=rows.at(-1).t+60000;const stale=analyze(rows,{interval:'1m',now:latest+300000});assert.equal(stale.signal,'AGUARDE');assert.equal(stale.plan,null);assert.ok(stale.decision.blockers.length);const weak=rows.map(r=>({...r}));weak.at(-1).volume=1;const out=analyze(weak,{interval:'1m',now:latest});assert.equal(out.signal,'AGUARDE');assert.ok(out.decision.blockers.some(r=>r.includes('Volume')));});

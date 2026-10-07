@@ -268,11 +268,11 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   const volumeDirection = Math.sign(Number(at(calc).close) - Number(at(calc).open));
   const volumeQuality = Number.isFinite(volumeRatio) && directionSign !== 0 && volumeDirection === directionSign ? clamp(volumeRatio / 2, 0, 1) : 0;
   let rawConfidence = 10 + evidenceGroups * 7 + strengthQuality * 35 + trendQuality * 12 + volumeQuality * 5 - conflictingGroups * 5;
-  const usableSpreadPct = useMicro && Number.isFinite(Number(micro.spreadPct)) ? Number(micro.spreadPct) : null;
+  const usableSpreadPct = useMicro && Number.isFinite(micro.spreadPct) ? micro.spreadPct : null;
   if (Number.isFinite(usableSpreadPct) && usableSpreadPct > 0.08) rawConfidence -= Math.min(20, usableSpreadPct * 80);
   const confidence = Math.round(clamp(rawConfidence * (Number(calibration?.confidenceFactor) || 1), 0, 92));
   const minimum = 30 + clamp(Number(calibration?.thresholdAdjustment) || 0, -2, 5);
-  const signal = rawScore >= minimum ? "COMPRA" : rawScore <= -minimum ? "VENDA" : "AGUARDE";
+  let signal = rawScore >= minimum ? "COMPRA" : rawScore <= -minimum ? "VENDA" : "AGUARDE";
   const volatilityPct = percent(atrValue, price);
   const volatilityLimit = { "1m": 0.8, "3m": 1.1, "5m": 1.4, "15m": 2.2, "30m": 3, "1h": 4, "2h": 5, "4h": 7, "6h": 9, "8h": 10, "12h": 12, "1d": 18 }[cleanIntervalValue];
   const warnings = [];
@@ -293,6 +293,15 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   const completenessScore = validation.gaps ? Math.max(30, 100 - validation.gaps * 10) : 100;
   const dataQualityScore = Math.round(freshnessScore * 0.45 + liquidityScore * 0.35 + completenessScore * 0.2);
   const contraStructure = signal !== "AGUARDE" && structure.bias !== 0 && Math.sign(structure.bias) !== Math.sign(rawScore);
+  const technicalSignal = signal,blockers=[];
+  if(ageMs>expectedAge)blockers.push('Velas fechadas atrasadas.');
+  if(validation.gaps)blockers.push('Histórico com lacunas temporais.');
+  if(!Number.isFinite(volumeRatio)||volumeRatio<.55)blockers.push('Volume insuficiente para confirmar a leitura.');
+  if(volatilityPct>volatilityLimit)blockers.push('Volatilidade acima do limite deste período.');
+  if(conflictingGroups>=3)blockers.push('Conflito entre grupos de evidências.');
+  if(contraStructure)blockers.push('Direção contrária à estrutura principal.');
+  if(confidence<65||dataQualityScore<65)blockers.push('Qualidade insuficiente para confirmação.');
+  if(blockers.length)signal='AGUARDE';
   const plan = contraStructure ? null : buildRiskPlan({ signal, price, atrValue, levels, account, riskPct, spreadPct: usableSpreadPct || 0 });
 
   return {
@@ -300,6 +309,7 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
     symbol: cleanSymbolValue, interval: cleanIntervalValue, ts: now, calculatedAt: now, latestCandleOpenTime: latest.t, latestCandleCloseTime: latest.closeTime || latest.t + INTERVAL_MS[cleanIntervalValue] - 1,
     marketDataAgeMs: ageMs, microDataAgeMs: Number.isFinite(micro.ageMs) ? micro.ageMs : null, price: priceRound(price), signal, score: rawScore, rawScoreSum: rawSum, threshold: minimum, confidence,
     confidenceMeaning: "qualidade das evidências alinhadas, não probabilidade garantida de lucro", regime: structure.regime, structure, candle,
+    decision:{technicalSignal,blockers,policy:'conservative-simulation-v1'},
     reasons: reasons.sort((a, b) => Math.abs(b.points) - Math.abs(a.points)), warnings,
     dataQuality: { score: dataQualityScore, freshness: freshnessScore, liquidity: liquidityScore, completeness: completenessScore, lastCandleClosed: true, ageMs, conflictingGroups, samples: calc.length, gaps: validation.gaps },
     calibration: calibration ? (() => {

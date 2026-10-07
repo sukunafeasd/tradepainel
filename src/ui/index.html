@@ -48,9 +48,10 @@
         <article class="metric-card panel"><span class="eyebrow">ALINHAMENTO MTF</span><strong id="alignment">--</strong><div class="frame-pills" id="frames"></div><small>alinhamento · cobertura disponível/esperada</small></article>
       </section>
 
+      <section class="entry-strip" aria-label="Condição de entrada simulada" aria-live="polite" aria-atomic="true"><div><span class="eyebrow">ENTRADA · SIMULAÇÃO</span><strong id="entryState">Aguarde confirmação</strong><p id="entryReason">Aguardando leitura e cotação atualizadas.</p></div><dl><div><dt>Confirmado às</dt><dd id="entryTime">--</dd></div><div><dt>Preço confirmado</dt><dd id="entryPrice">--</dd></div><div><dt>Janela até</dt><dd id="entryExpiry">--</dd></div></dl></section>
       <section class="chart-panel panel">
         <div class="section-head chart-head"><div><span class="eyebrow">PREÇO + CONTEXTO</span><h2>Mercado ao vivo</h2></div><div class="chart-tools"><div class="legend"><span class="ema9">EMA 9</span><span class="ema20">EMA 20</span><span class="ema50">EMA 50</span><span class="vwap">VWAP</span></div><div class="chart-actions"><button id="chartFollow" class="active" type="button" title="Acompanhar a vela mais recente">● Ao vivo</button><button id="chartOlder" type="button" title="Ver velas anteriores">←</button><button id="chartZoomIn" type="button" title="Aproximar">＋</button><button id="chartZoomOut" type="button" title="Afastar">－</button><button id="chartHorizontal" type="button" title="Traçar suporte ou resistência">— Nível</button><button id="chartTrend" type="button" title="Traçar linha de tendência com dois cliques">╱ Tendência</button><button id="chartClear" type="button" title="Apagar desenhos">⌫</button><button id="chartReset" type="button" title="Restaurar gráfico">↺</button></div></div></div>
-        <div class="chart-wrap"><canvas id="chart"></canvas><div id="chartTooltip" class="chart-tooltip"></div><div id="chartEmpty" class="chart-empty">Carregando 500 velas…</div></div>
+        <div class="chart-wrap"><canvas id="chart"></canvas><div id="chartTooltip" class="chart-tooltip"></div><div id="chartEmpty" class="chart-empty">Carregando 500 velas…</div></div><div class="chart-footer"><span id="candleStatus">Aguardando vela ao vivo</span><span>OHLC · volume da bolsa</span></div>
       </section>
 
       <nav class="tabs" id="tabs">

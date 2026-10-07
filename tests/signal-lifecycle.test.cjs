@@ -8,6 +8,7 @@ const { SignalLifecycleStore } = require("../src/engine/signal-lifecycle.cjs");
 
 const base = (overrides = {}) => ({ id:`analysis-${Math.random()}`,symbol:"BTCUSDT",interval:"1m",signal:"COMPRA",score:40,threshold:30,confidence:80,calculatedAt:1_700_000_000_000,latestCandleCloseTime:1_700_000_000_000,marketDataAgeMs:100,dataQuality:{score:90},multiTimeframe:{status:"ready",coverage:100,alignment:75,signal:"COMPRA"},price:100,plan:{entry:100,stop:99,target1:101,target2:102},...overrides });
 const datum = (at, value = 100, stale = false) => ({symbol:"BTCUSDT",value,exchangeTimestamp:at,receivedAt:at,source:"aggTrade-test",stale});
+test('mesma analise em cache nao conta como duas invalidacoes',()=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dieftrade-weak-cache-'));let now=1700000000000;try{const store=new SignalLifecycleStore(dir,{now:()=>now});store.evaluate(base(),datum(now));now+=1000;store.evaluate(base(),datum(now));const weak=base({id:'weak',signal:'AGUARDE',score:0});now+=1000;assert.equal(store.evaluate(weak,datum(now)).current.status,'WEAKENING_BUY');now+=1000;assert.equal(store.evaluate(weak,datum(now)).current.status,'WEAKENING_BUY');now+=1000;assert.equal(store.evaluate({...weak,id:'weak-new'},datum(now)).current.status,'INVALIDATED');}finally{fs.rmSync(dir,{recursive:true,force:true});}});
 
 test("candidato estável cria exatamente um sinal e polls repetidos preservam signalId", async () => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),"dieftrade-lifecycle-"));let now=1_700_000_000_000;

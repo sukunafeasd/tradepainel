@@ -85,6 +85,14 @@ button:disabled { transform:none; }
 @media(max-width:560px) { .brand { width:auto; } .brand b { font-size:21px; } .brand span { font-size:10px; } .market-state { font-size:11px; } .market-state .divider,#clock { display:none; } .shell { padding:12px; gap:12px; } .signal-grid { grid-template-columns:1fr; } .hero { padding:14px 0; } .price-block { margin-right:0; } .intervals { width:100%; } .chart-panel,.detail { padding:12px; } .chart-wrap { height:300px; } .theme-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .modal-backdrop { padding:12px; } .settings-modal { padding:16px; max-height:calc(100dvh - 24px); } }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; } }
 body.reduce-motion .topbar::after { animation:none; }
+.entry-strip { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; padding:16px 0; margin-top:16px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.entry-strip strong { display:block; font-size:16px; color:var(--gold); margin-top:5px; }
+.entry-strip[data-ready=true] strong { color:var(--up); }
+.entry-strip p { color:var(--muted); font-size:12px; line-height:1.5; margin:6px 0 0; max-width:600px; }
+.entry-strip dl { display:flex; gap:24px; margin:0; flex-wrap:wrap; }
+.entry-strip dt { color:var(--muted); font-size:11px; }
+.entry-strip dd { color:var(--text); margin:5px 0 0; font-size:13px; font-variant-numeric:tabular-nums; }
+.chart-footer { display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; border-top:1px solid var(--line); padding-top:10px; margin-top:8px; }
 
 /* Theme tokens also cover controls that otherwise inherit native gray chrome. */
 .settings-button,.modal-close,.chart-actions button,.tabs button,.intervals button {

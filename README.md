@@ -43,6 +43,19 @@ pnpm build
 
 O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, simulações, alertas, sinais e diário ficam fora do repositório, na pasta de dados do aplicativo do Windows.
 
+## Versão 0.9.3
+
+- Velas com corpo delineado, volume separado, estado de formacao e precos pequenos
+  preservados. Visual adaptado aos cinco temas.
+- Leitura em aguarde quando ha lacunas, dados atrasados, volume insuficiente,
+  volatilidade extrema ou conflitos relevantes. Score tecnico permanece auditavel.
+- Faixa de entrada simulada mostra confirmacao, preco e janela de validade. Revisa
+  cotacao, plano, distancia em ATR e idade da analise a cada segundo, sem consultar
+  a bolsa a cada refresh. Limites sao heuristicas conservadoras, nao previsoes.
+- Analise em cache nao conta duas vezes para invalidar um sinal.
+- Testes de software nao demonstram melhora estatistica de acerto ou rentabilidade;
+  isso exige avaliacao historica fora da amostra, incluindo custos e risco.
+
 ## Versão 0.9.2
 
 - Book parcial validado por sequencia, separado da atualidade do melhor bid/ask;

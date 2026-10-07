@@ -1,0 +1,10 @@
+"use strict";
+const test=require('node:test'),assert=require('node:assert/strict');
+const {assessEntry}=require('../src/engine/entry-assessment.cjs');
+const now=1800000000000;
+const analysis=()=>({symbol:'BTCUSDT',interval:'1m',signal:'COMPRA',calculatedAt:now,confidence:80,dataQuality:{score:90},multiTimeframe:{status:'ready',coverage:100,alignment:80},indicators:{atr:2}});
+const signal=()=>({symbol:'BTCUSDT',interval:'1m',status:'CONFIRMED_BUY',direction:'COMPRA',confirmedAt:now,confirmedPrice:100,confirmedPlan:{stop:98,target1:104}});
+const datum=(value=100)=>({symbol:'BTCUSDT',value,receivedAt:now,exchangeTimestamp:now,source:'test',stale:false});
+test('entrada requer confirmacao e cotacao atual, sem prever horario futuro',()=>{const out=assessEntry(analysis(),signal(),datum(),now);assert.equal(out.status,'READY');assert.equal(out.confirmedAt,now);assert.equal(out.expiresAt,now+30000);assert.equal(assessEntry(analysis(),{...signal(),status:'CANDIDATE_BUY'},datum(),now).status,'WAIT');});
+test('bloqueia entrada atrasada, perseguida, invalidada ou sem cotacao',()=>{assert.equal(assessEntry(analysis(),signal(),datum(),now+30001).status,'EXPIRED');for(const price of [101.5,97,104])assert.equal(assessEntry(analysis(),signal(),datum(price),now).status,'WAIT');assert.equal(assessEntry(analysis(),signal(),null,now).status,'WAIT');assert.equal(assessEntry({...analysis(),calculatedAt:now-16000},signal(),datum(),now).status,'WAIT');});
+test('venda tem limites simetricos e nao herda plano de compra',()=>{const a={...analysis(),signal:'VENDA'},s={...signal(),status:'CONFIRMED_SELL',direction:'VENDA',confirmedPlan:{stop:102,target1:96}};assert.equal(assessEntry(a,s,datum(),now).status,'READY');assert.equal(assessEntry(a,s,datum(96),now).status,'WAIT');assert.equal(assessEntry(a,signal(),datum(),now).status,'WAIT');});

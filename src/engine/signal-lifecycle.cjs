@@ -149,6 +149,11 @@ class SignalLifecycleStore {
         }
       }
     } else if (ACTIVE_STATES.has(current.status)) {
+      if (analysis.id === current.lastEvaluationId) {
+        current.lastEvaluatedAt = at; data.current[key] = current; data.updatedAt = at; this.store.saveQueued();
+        return { current: structuredClone(current), events };
+      }
+      current.lastEvaluationId = analysis.id;
       const confirmedDirection = current.direction || directionForState(current.status);
       if (this.#holding(analysis, confirmedDirection)) {
         const wasWeak = /^WEAKENING_/.test(current.status);
