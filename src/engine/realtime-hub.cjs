@@ -7,7 +7,7 @@ const { ExchangeClock } = require("./clock.cjs");
 
 const STREAM_HOSTS = ["wss://stream.binance.com:9443", "wss://stream.binance.com:443", "wss://data-stream.binance.vision"];
 const STABLES = new Set(["USDC", "FDUSD", "BUSD", "TUSD", "USDE", "DAI", "EUR", "AEUR", "BRL"]);
-const STREAM_FRESH_MS = { ticker: 10000, candle: 12000, book: 8000, flow: 10000 };
+const STREAM_FRESH_MS = { ticker: 10000, candle: 12000, book: 8000, quote: 8000, flow: 10000 };
 const EVENT_FUTURE_TOLERANCE_MS = 2000;
 const EVENT_MAX_LAG_MS = 15000;
 const SYMBOL_SILENCE_RECONNECT_MS = 20000;
@@ -15,6 +15,7 @@ const SNAPSHOT_INTERVAL_MS = 100;
 
 const finitePositive = (value) => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const finiteNonnegative = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+const sequenceId = value => (typeof value === "number" && !Number.isSafeInteger(value)) || !/^\d+$/.test(String(value)) ? null : BigInt(value);
 
 class RealtimeHub extends EventEmitter {
   constructor({ streamHosts = STREAM_HOSTS, WebSocketImpl = WebSocket, clock = new ExchangeClock(), reconnectBaseMs = 800 } = {}) {
@@ -44,6 +45,10 @@ class RealtimeHub extends EventEmitter {
     this.alertTradeIds = new Map();
     this.priceHistory = new Map();
     this.flowQueue = [];
+    this.flowHead = 0;
+    this.flowDirty = true;
+    this.depthUpdateId = null;
+    this.quoteUpdateId = null;
     this.flowTotals = { buy: 0, sell: 0, buyQuote: 0, sellQuote: 0 };
     this.tradeIds = new Map();
     this.lastMarketBroadcastMono = 0;
@@ -58,7 +63,7 @@ class RealtimeHub extends EventEmitter {
   }
 
   #blankState() {
-    return { symbol: this.symbol, interval: this.interval, generation: this.symbolGeneration, connected: false, stale: true, lastEventAt: 0, freshness: { ticker: null, candle: null, book: null, flow: null }, ticker: null, candle: null, book: { bids: [], asks: [], imbalance: null, bidVolume: 0, askVolume: 0 }, trades: [], flow: { buyVolume: 0, sellVolume: 0, buyQuoteVolume: 0, sellQuoteVolume: 0, delta: 0, deltaQuote: 0, buyRatio: 0.5, windowMs: 60000, sampleDurationMs: 0, trades: 0 }, dirty: true };
+    return { symbol: this.symbol, interval: this.interval, generation: this.symbolGeneration, connected: false, stale: true, lastEventAt: 0, freshness: { ticker: null, candle: null, book: null, quote: null, flow: null }, ticker: null, candle: null, book: { bids: [], asks: [], imbalance: null, bidVolume: 0, askVolume: 0 }, trades: [], flow: { buyVolume: 0, sellVolume: 0, buyQuoteVolume: 0, sellQuoteVolume: 0, delta: 0, deltaQuote: 0, buyRatio: null, windowMs: 60000, sampleDurationMs: 0, trades: 0 }, dirty: true };
   }
 
   #ensureTimers() {
@@ -87,6 +92,8 @@ class RealtimeHub extends EventEmitter {
     const old = this.socket;
     this.socket = null;
     this.flowQueue = [];
+    this.flowHead = 0; this.flowDirty = true;
+    this.depthUpdateId = null; this.quoteUpdateId = null;
     this.flowTotals = { buy: 0, sell: 0, buyQuote: 0, sellQuote: 0 };
     this.tradeIds.clear();
     this.lastSymbolEventMono = 0;
@@ -115,15 +122,20 @@ class RealtimeHub extends EventEmitter {
   }
 
   snapshot() {
+    this.#refreshFlow(this.clock.now());
     const { dirty, ...safe } = this.state;
     const snapshot = structuredClone({ ...safe, connection: this.metrics });
     const nowMono = performance.now();
     for (const [component, item] of Object.entries(snapshot.freshness)) {
       if (!item) continue;
       item.ageMs = Math.max(0, nowMono - item.receivedMono, this.clock.now() - item.exchangeTimestamp);
-      item.stale = item.ageMs > STREAM_FRESH_MS[component];
+      item.stale = Boolean(item.invalidated || item.ageMs > STREAM_FRESH_MS[component]);
     }
     snapshot.stale = !snapshot.connected || !["candle", "book", "ticker"].some(component => snapshot.freshness[component] && !snapshot.freshness[component].stale);
+    if (snapshot.freshness.quote?.stale && snapshot.ticker) {
+      for (const field of ["bid", "ask", "bidQuantity", "askQuantity", "spread", "spreadPct"]) snapshot.ticker[field] = null;
+    }
+    if (snapshot.freshness.book?.stale) snapshot.book.imbalance = null;
     return snapshot;
   }
 
@@ -142,7 +154,7 @@ class RealtimeHub extends EventEmitter {
     }
     const tickerFresh = this.state.freshness.ticker;
     const tickerAge = tickerFresh ? Math.max(0, nowMono - tickerFresh.receivedMono, now - tickerFresh.exchangeTimestamp) : Infinity;
-    if (this.state.ticker?.last > 0 && tickerFresh && tickerAge <= maxAgeMs) output[this.symbol] = { symbol: this.symbol, value: this.state.ticker.last, exchangeTimestamp: tickerFresh.exchangeTimestamp, receivedAt: tickerFresh.receivedAt, ageMs: tickerAge, source: "binance-aggtrade", stale: false, generation: this.symbolGeneration };
+    if (this.state.ticker?.last > 0 && tickerFresh && !tickerFresh.invalidated && tickerAge <= maxAgeMs) output[this.symbol] = { symbol: this.symbol, value: this.state.ticker.last, exchangeTimestamp: tickerFresh.exchangeTimestamp, receivedAt: tickerFresh.receivedAt, ageMs: tickerAge, source: "binance-aggtrade", stale: false, generation: this.symbolGeneration };
     return output;
   }
 
@@ -205,7 +217,7 @@ class RealtimeHub extends EventEmitter {
       this.marketSocket = null; this.marketOpenedMono = 0; this.metrics.marketReconnects += 1; this.marketHostIndex = (this.marketHostIndex + 1) % this.streamHosts.length;
       if (!this.closed) this.marketReconnectTimer = setTimeout(() => this.#connectMarket(generation), 2500 + Math.random() * 1000);
     });
-    socket.on("error", (error) => { this.metrics.lastError = error?.message || "Falha no radar"; try { socket.terminate(); } catch {} });
+    socket.on("error", (error) => { if (this.closed || generation !== this.marketGeneration || socket !== this.marketSocket) return; this.metrics.lastError = error?.message || "Falha no radar"; try { socket.terminate(); } catch {} });
   }
 
   #connectSymbol(generation) {
@@ -224,9 +236,10 @@ class RealtimeHub extends EventEmitter {
     socket.on("close", () => {
       if (generation !== this.symbolGeneration || socket !== this.socket) return;
       this.socket = null; this.symbolOpenedMono = 0; this.lastSymbolEventMono = 0; this.state.connected = false; this.state.stale = true; this.state.dirty = true; this.metrics.reconnects += 1; this.metrics.lastDisconnectAt = this.clock.now();
+      for (const item of Object.values(this.state.freshness)) if (item) { item.invalidated = true; item.stale = true; }
       if (!this.closed) { this.symbolHostIndex = (this.symbolHostIndex + 1) % this.streamHosts.length; const delay = Math.min(15000, this.reconnectBaseMs * (2 ** Math.min(this.retry++, 4))) + Math.random() * 300; this.symbolReconnectTimer = setTimeout(() => this.#connectSymbol(generation), delay); }
     });
-    socket.on("error", (error) => { this.metrics.lastError = error?.message || "Falha no fluxo"; try { socket.terminate(); } catch {} });
+    socket.on("error", (error) => { if (this.closed || generation !== this.symbolGeneration || socket !== this.socket) return; this.metrics.lastError = error?.message || "Falha no fluxo"; try { socket.terminate(); } catch {} });
   }
 
   #fresh(component, exchangeTimestamp, receivedAt, receivedMono) {
@@ -265,7 +278,7 @@ class RealtimeHub extends EventEmitter {
       this.alertSocket = null; this.metrics.alertReconnects += 1;
       if (!this.closed && this.alertSymbols.size) this.alertReconnectTimer = setTimeout(() => this.#connectAlertPrices(generation), 1500 + Math.random() * 500);
     });
-    socket.on("error", (error) => { this.metrics.lastError = error?.message || "Falha no fluxo de alertas"; try { socket.terminate(); } catch {} });
+    socket.on("error", (error) => { if (this.closed || generation !== this.alertGeneration || socket !== this.alertSocket) return; this.metrics.lastError = error?.message || "Falha no fluxo de alertas"; try { socket.terminate(); } catch {} });
   }
 
   #validEventTimestamp(exchangeTimestamp, receivedAt) {
@@ -285,6 +298,28 @@ class RealtimeHub extends EventEmitter {
     while (rows.length && rows[0].exchangeTimestamp < minimum) rows.shift();
     if (rows.length > 20000) rows.splice(0, rows.length - 20000);
     this.priceHistory.set(datum.symbol, rows);
+  }
+
+  #refreshFlow(now) {
+    // A cursor avoids shifting the entire queue for each trade in a burst.
+    const minimum = now - 60000;
+    while (this.flowHead < this.flowQueue.length && this.flowQueue[this.flowHead].t < minimum) {
+      const trade = this.flowQueue[this.flowHead++], quote = trade.price * trade.quantity;
+      if (trade.side === "buy") { this.flowTotals.buy -= trade.quantity; this.flowTotals.buyQuote -= quote; }
+      else { this.flowTotals.sell -= trade.quantity; this.flowTotals.sellQuote -= quote; }
+      this.tradeIds.delete(trade.id); this.flowDirty = true; this.state.dirty = true;
+    }
+    if (!this.flowDirty) return;
+    if (this.flowHead === this.flowQueue.length) {
+      this.flowQueue = []; this.flowHead = 0;
+      this.flowTotals = { buy: 0, sell: 0, buyQuote: 0, sellQuote: 0 };
+    } else if (this.flowHead > 2048 && this.flowHead * 2 >= this.flowQueue.length) {
+      this.flowQueue = this.flowQueue.slice(this.flowHead); this.flowHead = 0;
+    }
+    const count = this.flowQueue.length - this.flowHead, totals = this.flowTotals, total = totals.buy + totals.sell;
+    this.state.trades = this.flowQueue.slice(Math.max(this.flowHead, this.flowQueue.length - 160)).reverse();
+    this.state.flow = { buyVolume: totals.buy, sellVolume: totals.sell, buyQuoteVolume: totals.buyQuote, sellQuoteVolume: totals.sellQuote, delta: totals.buy - totals.sell, deltaQuote: totals.buyQuote - totals.sellQuote, buyRatio: total ? totals.buy / total : null, windowMs: 60000, sampleDurationMs: count ? Math.max(0, this.flowQueue.at(-1).t - this.flowQueue[this.flowHead].t) : 0, trades: count };
+    this.flowDirty = false;
   }
 
   #handleMessage(raw, context) {
@@ -321,15 +356,7 @@ class RealtimeHub extends EventEmitter {
         this.flowQueue.push(trade);
         const quote = trade.price * trade.quantity;
         if (trade.side === "buy") { this.flowTotals.buy += trade.quantity; this.flowTotals.buyQuote += quote; } else { this.flowTotals.sell += trade.quantity; this.flowTotals.sellQuote += quote; }
-        const minimum = receivedAt - 60000;
-        while (this.flowQueue.length && this.flowQueue[0].t < minimum) {
-          const expired = this.flowQueue.shift(); const expiredQuote = expired.price * expired.quantity;
-          if (expired.side === "buy") { this.flowTotals.buy -= expired.quantity; this.flowTotals.buyQuote -= expiredQuote; } else { this.flowTotals.sell -= expired.quantity; this.flowTotals.sellQuote -= expiredQuote; }
-          this.tradeIds.delete(expired.id);
-        }
-        const total = this.flowTotals.buy + this.flowTotals.sell;
-        this.state.trades = this.flowQueue.slice(-160).reverse();
-        this.state.flow = { buyVolume: this.flowTotals.buy, sellVolume: this.flowTotals.sell, buyQuoteVolume: this.flowTotals.buyQuote, sellQuoteVolume: this.flowTotals.sellQuote, delta: this.flowTotals.buy - this.flowTotals.sell, deltaQuote: this.flowTotals.buyQuote - this.flowTotals.sellQuote, buyRatio: total ? this.flowTotals.buy / total : 0.5, windowMs: 60000, sampleDurationMs: this.flowQueue.length ? Math.max(0, trade.t - this.flowQueue[0].t) : 0, trades: this.flowQueue.length };
+        this.flowDirty = true;
         const current = this.state.ticker || { bid: null, ask: null, bidQuantity: null, askQuantity: null, spread: null, spreadPct: null };
         this.state.ticker = { ...current, last: trade.price };
         const candle = this.state.candle;
@@ -340,25 +367,40 @@ class RealtimeHub extends EventEmitter {
         this.#rememberPrice(priceDatum);
         this.emit("price", structuredClone(priceDatum));
         this.#fresh("ticker", trade.t, receivedAt, receivedMono); this.#fresh("flow", trade.t, receivedAt, receivedMono); accepted = true;
-      } else if (data.e === "depthUpdate" || (Array.isArray(data.bids) && Array.isArray(data.asks))) {
+      } else if (data.e === "depthUpdate") {
+        // This subscription uses partial depth snapshots, not incremental diffs.
+        this.metrics.malformedEvents += 1; return;
+      } else if (Array.isArray(data.bids) && Array.isArray(data.asks)) {
         if (data.s && String(data.s).toUpperCase() !== context.symbol) return;
-        const parse = (rows) => (rows || []).map(([price, quantity]) => [finitePositive(price), finiteNonnegative(quantity)]).filter(([price, quantity]) => price && quantity > 0).slice(0, 20);
-        const bids = parse(data.bids || data.b); const asks = parse(data.asks || data.a);
+        const id = sequenceId(data.lastUpdateId);
+        if (id == null) { this.metrics.malformedEvents += 1; return; }
+        if (this.depthUpdateId != null && id < this.depthUpdateId) { this.metrics.outOfOrderEvents += 1; return; }
+        const parse = (rows, order) => {
+          if (rows.length > 500 || !rows.every(row => Array.isArray(row) && row.length >= 2 && finitePositive(row[0]) && finiteNonnegative(row[1]) != null)) return [];
+          return [...new Map(rows.map(([price, quantity]) => [Number(price), Number(quantity)])).entries()].filter(([, quantity]) => quantity > 0).sort((a, b) => order * (a[0] - b[0])).slice(0, 20);
+        };
+        const bids = parse(data.bids, -1); const asks = parse(data.asks, 1);
         if (!bids.length || !asks.length || Math.max(...bids.map(([p]) => p)) > Math.min(...asks.map(([p]) => p))) return;
+        if (id === this.depthUpdateId && (JSON.stringify(bids) !== JSON.stringify(this.state.book.bids) || JSON.stringify(asks) !== JSON.stringify(this.state.book.asks))) { this.metrics.outOfOrderEvents += 1; return; }
         const mid = (bids[0][0] + asks[0][0]) / 2;
         const weighted = (rows) => rows.reduce((sum, [price, quantity]) => sum + quantity / (1 + Math.abs(price - mid) / mid * 1000), 0);
         const bidVolume = weighted(bids); const askVolume = weighted(asks);
         const eventTime = Number(data.E || receivedAt); if (!this.#validEventTimestamp(eventTime, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
         this.state.book = { bids, asks, bidVolume, askVolume, imbalance: bidVolume + askVolume ? bidVolume / (bidVolume + askVolume) : 0.5 };
+        this.depthUpdateId = id;
         this.#fresh("book", eventTime, receivedAt, receivedMono); accepted = true;
       } else if (data.b && data.a && data.B != null && data.A != null) {
         if (data.s && String(data.s).toUpperCase() !== context.symbol) return;
         const bid = finitePositive(data.b); const ask = finitePositive(data.a); const bidQuantity = finiteNonnegative(data.B); const askQuantity = finiteNonnegative(data.A);
         if (!bid || !ask || bid > ask || bidQuantity == null || askQuantity == null) return;
+        const id = sequenceId(data.u);
+        if (id == null) { this.metrics.malformedEvents += 1; return; }
+        if (this.quoteUpdateId != null && id <= this.quoteUpdateId) { this.metrics.outOfOrderEvents += 1; return; }
         const mid = (bid + ask) / 2;
         const eventTime = Number(data.E || receivedAt); if (!this.#validEventTimestamp(eventTime, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
         this.state.ticker = { ...(this.state.ticker || {}), bid, ask, bidQuantity, askQuantity, spread: ask - bid, spreadPct: ((ask - bid) / mid) * 100 };
-        this.#fresh("book", eventTime, receivedAt, receivedMono); accepted = true;
+        this.quoteUpdateId = id;
+        this.#fresh("quote", eventTime, receivedAt, receivedMono); accepted = true;
       }
       if (!accepted) return;
       this.lastSymbolEventMono = receivedMono;
@@ -368,12 +410,13 @@ class RealtimeHub extends EventEmitter {
   }
 
   #watchdog() {
+    this.#refreshFlow(this.clock.now());
     const nowMono = performance.now(); let changed = false;
     for (const [component, threshold] of Object.entries(STREAM_FRESH_MS)) {
       const item = this.state.freshness[component];
       if (!item) continue;
       const ageMs = Math.max(0, nowMono - item.receivedMono, this.clock.now() - item.exchangeTimestamp);
-      const stale = ageMs > threshold;
+      const stale = Boolean(item.invalidated || ageMs > threshold);
       if (stale !== item.stale || Math.abs(item.ageMs - ageMs) > 500) changed = true;
       item.ageMs = ageMs; item.stale = stale;
     }

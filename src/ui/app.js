@@ -99,14 +99,14 @@ function updateSelection(){
 }
 function connectStream(){
   state.eventSource?.close(); const es=new EventSource(`/api/live/stream?t=${encodeURIComponent(state.token)}`); state.eventSource=es;
-  es.addEventListener("ready",()=>setConnection(false,"serviço local conectado · aguardando mercado"));
-  es.addEventListener("snapshot",event=>{try{const next=JSON.parse(event.data);if((next.symbol&&next.symbol!==state.symbol)||(next.interval&&next.interval!==state.interval))return;state.live=next;renderLive();}catch(error){console.warn("Snapshot inválido:",error.message);}});
+  es.addEventListener("ready",()=>{if(es===state.eventSource)setConnection(false,"serviço local conectado · aguardando mercado");});
+  es.addEventListener("snapshot",event=>{if(es!==state.eventSource)return;try{const next=JSON.parse(event.data);if((next.symbol&&next.symbol!==state.symbol)||(next.interval&&next.interval!==state.interval))return;state.live=next;renderLive();}catch(error){console.warn("Snapshot inválido:",error.message);}});
   es.addEventListener("market",event=>{try{const next=JSON.parse(event.data);if(Array.isArray(next)){state.coins=next;renderCoins();}}catch(error){console.warn("Mercado inválido:",error.message);}});
   es.addEventListener("coins",event=>{try{const next=JSON.parse(event.data);if(!Array.isArray(next))throw new Error("lista inválida");state.coins=next;renderCoins();}catch(error){console.warn("Lista de pares inválida:",error.message);}});
   es.addEventListener("alert",event=>{try{const alert=JSON.parse(event.data);notifyAlert(alert);state.alerts=state.alerts.map(item=>item.id===alert.id?alert:item);renderAlerts();}catch(error){console.warn("Alerta inválido:",error.message);}});
   es.addEventListener("paper-result",event=>{try{const result=JSON.parse(event.data);if(!result?.id)throw new Error("resultado sem identificação");if(result.id!==state.lastResultId){state.lastResultId=result.id;notifyPaperResult(result);}void refreshPaper();}catch(error){console.warn("Resultado inválido:",error.message);}});
   ["signal-candidate","signal-confirmed","signal-weakened","signal-invalidated","signal-suspended","signal-resumed","signal-candidate-cancelled"].forEach(type=>es.addEventListener(type,event=>{try{const item=JSON.parse(event.data);state.signalHistory=[item,...state.signalHistory.filter(row=>row.eventId!==item.eventId)].slice(0,100);void refreshSignals();if(type==="signal-confirmed")toast(`${item.direction} confirmada em ${priceFormat(item.confirmedPrice)}`);}catch(error){console.warn("Evento de sinal inválido:",error.message);}}));
-  es.onerror=()=>setConnection(false,"reconectando…");
+  es.onerror=()=>{if(es===state.eventSource)setConnection(false,"reconectando…");};
 }
 function renderLive(){
   const l=state.live;if(!l)return;const stale=Boolean(l.stale||l.freshness?.ticker?.stale);setConnection(Boolean(l.connected&&!stale),stale?"dados atrasados":"mercado ao vivo");
@@ -121,6 +121,7 @@ function mergeLiveCandle(candle){
   if(!candle||!Number.isFinite(candle.t)||![candle.open,candle.high,candle.low,candle.close].every(v=>Number.isFinite(v)&&v>0)||!Number.isFinite(candle.volume)||candle.volume<0)return;
   const rows=state.liveCandles||[],latest=rows.at(-1);
   if(latest&&(candle.t<latest.t||(candle.t===latest.t&&latest.closed&&!candle.closed)))return;
+  if(latest&&['t','open','high','low','close','volume','quoteVolume','closed'].every(key=>latest[key]===candle[key]))return;
   state.liveCandles=[...rows.filter(row=>row.t!==candle.t),{...candle,provisional:!candle.closed}].slice(-30);
   state.provisionalCandle=state.liveCandles.at(-1);requestChart();
 }

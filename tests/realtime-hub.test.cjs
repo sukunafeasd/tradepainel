@@ -4,6 +4,47 @@ const test=require("node:test");const assert=require("node:assert/strict");const
 class FakeSocket extends EventEmitter{static CONNECTING=0;static OPEN=1;static CLOSED=3;static instances=[];constructor(url){super();this.url=url;this.readyState=FakeSocket.CONNECTING;this.sent=[];FakeSocket.instances.push(this);}open(){this.readyState=FakeSocket.OPEN;this.emit("open");}send(value){this.sent.push(JSON.parse(value));}message(value){this.emit("message",Buffer.from(JSON.stringify(value)));}close(){this.readyState=FakeSocket.CLOSED;this.emit("close");}terminate(){this.close();}}
 const clock={now:()=>1_800_000_000_000,status:()=>({synced:true})};
 const kline=(overrides={})=>({stream:'btcusdt@kline_15m',data:{e:'kline',E:clock.now()-200,s:'BTCUSDT',k:{s:'BTCUSDT',i:'15m',t:clock.now()-5000,T:clock.now()+894999,o:'100',h:'102',l:'98',c:'101',v:'10',q:'1000',n:10,V:'5',x:false,...overrides}}});
+const depth=(id=10)=>({stream:'btcusdt@depth20@100ms',data:{lastUpdateId:id,bids:[['99','1'],['100','2']],asks:[['102','3'],['101','4']]}});
+const quote=(id=10)=>({stream:'btcusdt@bookTicker',data:{u:id,s:'BTCUSDT',b:'100',B:'2',a:'101',A:'4'}});
+test('book estavel pode renovar observacao sem aceitar dados diferentes no mesmo ID',()=>{
+  let now=clock.now();FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock:{now:()=>now}});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message(depth());now+=9000;assert.equal(hub.snapshot().freshness.book.stale,true);socket.message(depth());assert.equal(hub.snapshot().freshness.book.stale,false);socket.message({data:{...depth().data,bids:[['90','1']]}});assert.equal(hub.snapshot().book.bids[0][0],100);
+  }finally{hub.close();}
+});
+test('erro tardio de socket antigo nao altera estado da nova conexao',()=>{FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});try{hub.start();const old=FakeSocket.instances[1];old.open();hub.select('ETHUSDT','1m');const current=FakeSocket.instances.at(-1);current.open();old.emit('error',new Error('old socket'));assert.equal(hub.snapshot().connection.lastError,null);assert.equal(current.readyState,FakeSocket.OPEN);}finally{hub.close();}});
+
+test('book ordena niveis e bloqueia snapshot antigo e diff incremental',()=>{
+  FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message(depth());assert.equal(hub.snapshot().book.bids[0][0],100);assert.equal(hub.snapshot().book.asks[0][0],101);
+    socket.message({...depth(9),data:{...depth(9).data,bids:[['90','1']]}});assert.equal(hub.snapshot().book.bids[0][0],100);
+    socket.message({data:{e:'depthUpdate',s:'BTCUSDT',u:11,b:[['1','1']],a:[['2','1']]}});assert.equal(hub.snapshot().book.bids[0][0],100);
+    socket.message({...depth(11),data:{...depth(11).data,bids:[['bad','1']]}});assert.equal(hub.snapshot().book.bids[0][0],100);
+  }finally{hub.close();}
+});
+test('melhor bid e ask nao renovam profundidade antiga',()=>{
+  let now=clock.now();FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock:{now:()=>now}});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message(depth());now+=9000;socket.message(quote());const snapshot=hub.snapshot();assert.equal(snapshot.freshness.book.stale,true);assert.equal(snapshot.freshness.quote.stale,false);assert.equal(snapshot.book.imbalance,null);socket.message({...quote(9),data:{...quote(9).data,b:'90'}});assert.equal(hub.snapshot().ticker.bid,100);
+    now+=9000;assert.equal(hub.snapshot().ticker.spreadPct,null);
+  }finally{hub.close();}
+});
+test('queda invalida dados antigos ate cada fonte receber uma nova mensagem',t=>{
+  t.mock.timers.enable({apis:['setTimeout']});FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message({data:{e:'aggTrade',s:'BTCUSDT',a:1,T:clock.now(),p:'100',q:'1',m:false}});assert.ok(hub.priceDatums().BTCUSDT);socket.close();assert.equal(hub.priceDatums().BTCUSDT,undefined);
+    t.mock.timers.tick(2000);const current=FakeSocket.instances.at(-1);current.open();current.message(quote());assert.equal(hub.snapshot().freshness.ticker.stale,true);assert.equal(hub.priceDatums().BTCUSDT,undefined);
+    current.message({data:{e:'aggTrade',s:'BTCUSDT',a:2,T:clock.now(),p:'101',q:'1',m:false}});assert.equal(hub.priceDatums().BTCUSDT.value,101);
+  }finally{hub.close();t.mock.timers.reset();}
+});
+test('janela de fluxo expira mesmo sem chegar outro negocio',()=>{
+  let now=clock.now();FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock:{now:()=>now}});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();socket.message({data:{e:'aggTrade',s:'BTCUSDT',a:1,T:now,p:'100',q:'1',m:false}});assert.equal(hub.snapshot().flow.buyVolume,1);now+=60001;assert.equal(hub.snapshot().flow.buyVolume,0);assert.equal(hub.snapshot().flow.trades,0);assert.equal(hub.snapshot().flow.buyRatio,null);assert.equal(hub.tradeIds.size,0);
+  }finally{hub.close();}
+});
+test('rajada de negocios preserva totais e compacta fila expirada',()=>{
+  let now=clock.now();FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock:{now:()=>now}});
+  try{hub.start();const socket=FakeSocket.instances[1];socket.open();for(let a=1;a<=5000;a++)socket.message({data:{e:'aggTrade',s:'BTCUSDT',a,T:now,p:'100',q:'1',m:a%2===0}});assert.equal(hub.snapshot().flow.buyVolume,2500);assert.equal(hub.snapshot().flow.sellVolume,2500);assert.equal(hub.snapshot().trades.length,160);
+    now+=59000;for(let a=5001;a<=5050;a++)socket.message({data:{e:'aggTrade',s:'BTCUSDT',a,T:now,p:'100',q:'1',m:false}});now+=2000;const snapshot=hub.snapshot();assert.equal(snapshot.flow.trades,50);assert.equal(snapshot.flow.buyVolume,50);assert.equal(snapshot.flow.sellVolume,0);assert.equal(hub.flowQueue.length,50);assert.equal(hub.flowHead,0);
+  }finally{hub.close();}
+});
 
 test('negocio atualiza OHLC provisorio sem duplicar volume da bolsa',()=>{
   FakeSocket.instances=[];const hub=new RealtimeHub({streamHosts:['wss://test'],WebSocketImpl:FakeSocket,clock});

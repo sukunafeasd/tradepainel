@@ -28,6 +28,11 @@ test('redesenhos sao consolidados em um frame sem cancelar o anterior',()=>{
   h.run('drawChart=()=>{};requestChart();requestChart();requestChart();');assert.equal(frames.length,1);frames[0]();h.run('requestChart()');assert.equal(frames.length,2);
 });
 test('historico confirmado nao e substituido por vela provisoria antiga',()=>{const h=harness();h.run('state.analysis={series:{candles:[{t:2,close:105,closed:true}]}};state.liveCandles=[{t:2,close:99,closed:false}];');assert.equal(h.run('displayCandles()[0].close'),105);});
+test('snapshot sem mudanca na vela nao solicita outro redraw',()=>{const h=harness();h.run('let paints=0;requestChart=()=>{paints++};const candle={t:1,open:100,high:101,low:99,close:100,volume:10,closed:false};mergeLiveCandle(candle);mergeLiveCandle({...candle});');assert.equal(h.run('paints'),1);h.run('mergeLiveCandle({...candle,close:101})');assert.equal(h.run('paints'),2);});
+test('eventos da conexao SSE substituida nao contaminam interface',()=>{
+  const sources=[];class Source{constructor(){this.handlers={};sources.push(this);}addEventListener(type,fn){this.handlers[type]=fn;}close(){}}
+  const h=harness({EventSource:Source});h.run('renderLive=()=>{};connectStream();connectStream();');sources[0].handlers.snapshot({data:JSON.stringify({symbol:'BTCUSDT',interval:'15m',ticker:{last:99}})});assert.equal(h.run('state.live'),null);sources[0].onerror();assert.equal(h.run('$("connection").textContent'),'');sources[1].handlers.snapshot({data:JSON.stringify({symbol:'BTCUSDT',interval:'15m',ticker:{last:101}})});assert.equal(h.run('state.live.ticker.last'),101);
+});
 test("polling nao cancela analise lenta ainda em andamento",async()=>{
   let resolve,calls=0;
   const pending=new Promise(r=>resolve=r);

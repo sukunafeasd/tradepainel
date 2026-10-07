@@ -45,6 +45,15 @@ O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, s
 
 ## Versão 0.9.2
 
+- Book parcial validado por sequencia, separado da atualidade do melhor bid/ask;
+  diffs incrementais nao sao confundidos com snapshots completos.
+- Queda de socket invalida cada fonte ate ela receber novos dados; erros de
+  conexoes substituidas nao alteram a conexao atual.
+- Janela de fluxo expira sem depender de novos negocios, usa cursor na fila e
+  consolida a lista de negocios apenas quando precisa de um snapshot.
+- Velas identicas nao geram novos desenhos. Contratos de streams conferidos
+  na [documentacao oficial da Binance](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
+
 - Fluxo local consolida snapshots a cada 100 ms, com redraw por frame e sem
   reconstruir book e negocios enquanto essa aba esta oculta.
 - Negocios atualizam OHLC provisorio sem duplicar volume; velas fechadas e

@@ -121,8 +121,8 @@ function createServer({ dataDirectory, uiDirectory, credentialStore, market = nu
   });
 
   const microSnapshot = () => {
-    const snapshot = live.snapshot(); const items = [snapshot.freshness?.ticker, snapshot.freshness?.book, snapshot.freshness?.flow].filter(Boolean); const ageMs = items.length ? Math.max(...items.map((item) => Number(item.ageMs) || 0)) : Infinity;
-    return { stale: snapshot.stale || !items.length || items.some((item) => item.stale), ageMs, spreadPct: snapshot.ticker?.spreadPct, bookImbalance: snapshot.book?.imbalance, buyRatio: snapshot.flow?.buyRatio, delta: snapshot.flow?.delta, deltaQuote: snapshot.flow?.deltaQuote };
+    const snapshot = live.snapshot(); const items = [snapshot.freshness?.ticker, snapshot.freshness?.book, snapshot.freshness?.flow]; const ageMs = items.every(Boolean) ? Math.max(...items.map((item) => Number(item.ageMs) || 0)) : Infinity;
+    return { stale: snapshot.stale || items.some(item => !item || item.stale) || Boolean(snapshot.freshness?.quote?.stale), ageMs, spreadPct: snapshot.ticker?.spreadPct, bookImbalance: snapshot.book?.imbalance, buyRatio: snapshot.flow?.buyRatio, delta: snapshot.flow?.delta, deltaQuote: snapshot.flow?.deltaQuote };
   };
 
   const cacheSet = (key, value) => { analysisCache.set(key, { expiresAtMono: performance.now() + 4000, value: structuredClone(value) }); while (analysisCache.size > 250) analysisCache.delete(analysisCache.keys().next().value); };
