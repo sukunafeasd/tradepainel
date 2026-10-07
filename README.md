@@ -45,6 +45,12 @@ O executável portátil é criado em `dist/`. Dados pessoais, chave protegida, s
 
 ## Versão 0.9.3
 
+- Primeiro negocio de um novo periodo cria uma previa marcada explicitamente;
+  abertura e volume oficiais substituem a previa quando chega o kline da bolsa.
+- Fechamento oficial do periodo anterior e preservado mesmo apos a nova vela
+  aparecer; eventos em ordem incorreta nao fazem o preco voltar para tras.
+- Dados de agressao ausentes nao sao interpretados como volume vendedor.
+
 - Entrada considera ask na compra e bid na venda, cotacoes com ate dois segundos
   e risco/retorno tecnico ate o primeiro alvo. Plano revalidado preserva stop e
   alvos e recalcula quantidade de referencia sem aumentar o risco nominal.

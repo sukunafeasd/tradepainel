@@ -72,6 +72,14 @@ const credentials={status:()=>({configured:false,encryptionAvailable:true}),load
     await page.screenshot({path:path.join(os.tmpdir(),'dieftrade-terminal-refinado.png'),fullPage:false});
     const pixels=await page.locator('#chart').evaluate(canvas=>{const {data}=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height);let painted=0;for(let n=3;n<data.length;n+=4)if(data[n])painted++;return painted;});
     assert.ok(pixels>1000,'Chart must not be blank');
+    await page.locator('#chart').scrollIntoViewIfNeeded();
+    const chartBox=await page.locator('#chart').boundingBox();
+    await page.mouse.move(chartBox.x+chartBox.width-90,chartBox.y+chartBox.height-80);
+    await page.waitForFunction(()=>document.getElementById('chartTooltip').style.display==='block');
+    const tipBox=await page.locator('#chartTooltip').boundingBox();
+    assert.ok(tipBox.x>=chartBox.x&&tipBox.x+tipBox.width<=chartBox.x+chartBox.width+1);
+    assert.ok(tipBox.y>=chartBox.y&&tipBox.y+tipBox.height<=chartBox.y+chartBox.height+1);
+    await page.mouse.move(0,0);
     assert.equal(await page.locator('#chartZoomIn svg').count(),1);
     assert.equal(await page.locator('.brand img').evaluate(img=>img.complete&&img.naturalWidth>0),true);
     await page.locator('.coin-row').first().focus();

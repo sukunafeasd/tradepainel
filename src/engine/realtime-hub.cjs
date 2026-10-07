@@ -13,8 +13,9 @@ const EVENT_MAX_LAG_MS = 15000;
 const SYMBOL_SILENCE_RECONNECT_MS = 20000;
 const SNAPSHOT_INTERVAL_MS = 100;
 
-const finitePositive = (value) => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
-const finiteNonnegative = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+const numeric = value => ['number','string'].includes(typeof value) && String(value).trim()!=='' && Number.isFinite(Number(value));
+const finitePositive = (value) => numeric(value) && Number(value) > 0 ? Number(value) : null;
+const finiteNonnegative = (value) => numeric(value) && Number(value) >= 0 ? Number(value) : null;
 const sequenceId = value => (typeof value === "number" && !Number.isSafeInteger(value)) || !/^\d+$/.test(String(value)) ? null : BigInt(value);
 
 class RealtimeHub extends EventEmitter {
@@ -49,6 +50,8 @@ class RealtimeHub extends EventEmitter {
     this.flowDirty = true;
     this.depthUpdateId = null;
     this.quoteUpdateId = null;
+    this.latestAggregateId = null;
+    this.latestRawTradeId = null;
     this.flowTotals = { buy: 0, sell: 0, buyQuote: 0, sellQuote: 0 };
     this.tradeIds = new Map();
     this.lastMarketBroadcastMono = 0;
@@ -94,6 +97,7 @@ class RealtimeHub extends EventEmitter {
     this.flowQueue = [];
     this.flowHead = 0; this.flowDirty = true;
     this.depthUpdateId = null; this.quoteUpdateId = null;
+    this.latestAggregateId = null; this.latestRawTradeId = null;
     this.flowTotals = { buy: 0, sell: 0, buyQuote: 0, sellQuote: 0 };
     this.tradeIds.clear();
     this.lastSymbolEventMono = 0;
@@ -131,7 +135,7 @@ class RealtimeHub extends EventEmitter {
       item.ageMs = Math.max(0, nowMono - item.receivedMono, this.clock.now() - item.exchangeTimestamp);
       item.stale = Boolean(item.invalidated || item.ageMs > STREAM_FRESH_MS[component]);
     }
-    snapshot.stale = !snapshot.connected || !["candle", "book", "ticker"].some(component => snapshot.freshness[component] && !snapshot.freshness[component].stale);
+    snapshot.stale = !snapshot.connected || !["candle", "book", "ticker"].some(component => (component!=='candle'||!snapshot.candle?.awaitingExchange) && snapshot.freshness[component] && !snapshot.freshness[component].stale);
     if (snapshot.freshness.quote?.stale && snapshot.ticker) {
       for (const field of ["bid", "ask", "bidQuantity", "askQuantity", "spread", "spreadPct"]) snapshot.ticker[field] = null;
     }
@@ -288,7 +292,7 @@ class RealtimeHub extends EventEmitter {
   #connectionStale(nowMono = performance.now()) {
     const activity = this.lastSymbolEventMono || this.symbolOpenedMono;
     if (!activity || nowMono - activity > SYMBOL_SILENCE_RECONNECT_MS) return true;
-    return !["candle", "book", "ticker"].some((component) => this.state.freshness[component] && !this.state.freshness[component].stale);
+    return !["candle", "book", "ticker"].some((component) => (component!=='candle'||!this.state.candle?.awaitingExchange) && this.state.freshness[component] && !this.state.freshness[component].stale);
   }
 
   #rememberPrice(datum) {
@@ -337,13 +341,18 @@ class RealtimeHub extends EventEmitter {
         if (!Number.isFinite(candle.t) || !Number.isFinite(candle.closeTime) || !candle.open || !candle.high || !candle.low || !candle.close || candle.volume == null || candle.high < Math.max(candle.open, candle.close) || candle.low > Math.min(candle.open, candle.close)) return;
         const eventTime = Number(data.E || receivedAt); if (!this.#validEventTimestamp(eventTime, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
         const previous = this.state.candle;
-        if (previous && (candle.t < previous.t || (candle.t === previous.t && (eventTime < this.state.freshness.candle.exchangeTimestamp || (previous.closed && !candle.closed))))) { this.metrics.outOfOrderEvents += 1; return; }
+        if(previous&&candle.t<previous.t&&candle.closed&&candle.closeTime+1===previous.t){
+          this.publish('candle-closed',{...candle,symbol:context.symbol,interval:context.interval});return;
+        }
+        if (previous && (candle.t < previous.t || (candle.t === previous.t && ((!previous.awaitingExchange && eventTime < this.state.freshness.candle.exchangeTimestamp) || (previous.closed && !candle.closed))))) { this.metrics.outOfOrderEvents += 1; return; }
         this.state.candle = candle;
         // Trades update the provisional OHLC between official kline events.
         // Volumes remain exchange-reported; never add trades on top of kline totals.
         const tickerTime = this.state.freshness.ticker?.exchangeTimestamp;
-        if (!candle.closed && tickerTime > eventTime && tickerTime >= candle.t && tickerTime <= candle.closeTime) {
+        const lastKlineId=sequenceId(k.L),newerTrade=this.latestRawTradeId!=null&&lastKlineId!=null&&this.latestRawTradeId>lastKlineId;
+        if (!candle.closed && (tickerTime > eventTime || newerTrade) && tickerTime >= candle.t && tickerTime <= candle.closeTime) {
           candle.close = this.state.ticker.last; candle.high = Math.max(candle.high, candle.close); candle.low = Math.min(candle.low, candle.close);
+          if(previous?.t===candle.t){candle.high=Math.max(candle.high,previous.high);candle.low=Math.min(candle.low,previous.low);}
         }
         this.#fresh("candle", eventTime, receivedAt, receivedMono); accepted = true;
       } else if (data.e === "aggTrade") {
@@ -351,7 +360,11 @@ class RealtimeHub extends EventEmitter {
         const trade = { id: String(data.a ?? ""), t: Number(data.T), price: finitePositive(data.p), quantity: finitePositive(data.q), side: data.m ? "sell" : "buy" };
         if (!trade.id || !Number.isFinite(trade.t) || !trade.price || !trade.quantity || !this.#validEventTimestamp(trade.t, receivedAt)) { this.metrics.rejectedTimestamps += 1; return; }
         if (this.tradeIds.has(trade.id)) { this.metrics.duplicateTrades += 1; return; }
+        const aggregateId=sequenceId(data.a);
+        if(aggregateId==null){this.metrics.malformedEvents+=1;return;}
+        if(this.latestAggregateId!=null&&aggregateId<=this.latestAggregateId){this.metrics.outOfOrderEvents+=1;return;}
         if (trade.t < (this.state.freshness.ticker?.exchangeTimestamp || 0)) { this.metrics.outOfOrderEvents += 1; return; }
+        this.latestAggregateId=aggregateId;this.latestRawTradeId=sequenceId(data.l);
         this.tradeIds.set(trade.id, trade.t);
         this.flowQueue.push(trade);
         const quote = trade.price * trade.quantity;
@@ -359,6 +372,14 @@ class RealtimeHub extends EventEmitter {
         this.flowDirty = true;
         const current = this.state.ticker || { bid: null, ask: null, bidQuantity: null, askQuantity: null, spread: null, spreadPct: null };
         this.state.ticker = { ...current, last: trade.price };
+        // A first observed trade is only a visual preview. The official kline
+        // supplies the true opening price and accumulated exchange volume.
+        const frame=Number.parseInt(context.interval,10)*({m:60000,h:3600000,d:86400000}[context.interval.at(-1)]);
+        const start=Math.floor(trade.t/frame)*frame;
+        if(!this.state.candle||trade.t>this.state.candle.closeTime){
+          this.state.candle={t:start,closeTime:start+frame-1,open:trade.price,high:trade.price,low:trade.price,close:trade.price,volume:0,closed:false,awaitingExchange:true,volumeAvailable:false};
+          this.#fresh('candle',trade.t,receivedAt,receivedMono);
+        }
         const candle = this.state.candle;
         if (candle && !candle.closed && trade.t >= candle.t && trade.t <= candle.closeTime && trade.t >= this.state.freshness.candle.exchangeTimestamp) {
           candle.close = trade.price; candle.high = Math.max(candle.high, trade.price); candle.low = Math.min(candle.low, trade.price);

@@ -243,9 +243,10 @@ function analyze(candles, { symbol = "BTCUSDT", interval = "15m", micro = {}, ac
   }
   if (!useMicro || !Number.isFinite(micro.buyRatio)) {
     const recent = calc.slice(-20);
+    const completeAggression=recent.every(item=>Number.isFinite(item.quoteVolume)&&item.quoteVolume>=0&&Number.isFinite(item.takerBuyQuoteVolume)&&item.takerBuyQuoteVolume>=0&&item.takerBuyQuoteVolume<=item.quoteVolume);
     const quote = recent.reduce((sum, item) => sum + Number(item.quoteVolume || 0), 0);
     const taker = recent.reduce((sum, item) => sum + Number(item.takerBuyQuoteVolume || 0), 0);
-    if (quote > 0 && taker >= 0) {
+    if (completeAggression && quote > 0 && taker >= 0) {
       const ratio = taker / quote;
       if (ratio >= 0.56) add(5, "agressão", `Compradores tomaram ${(ratio * 100).toFixed(0)}% do volume fechado`, "Agressão estimada por velas confirmadas.");
       else if (ratio <= 0.44) add(-5, "agressão", `Vendedores tomaram ${((1 - ratio) * 100).toFixed(0)}% do volume fechado`, "Agressão estimada por velas confirmadas.");

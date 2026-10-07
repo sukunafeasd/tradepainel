@@ -93,6 +93,8 @@ body.reduce-motion .topbar::after { animation:none; }
 .entry-strip dt { color:var(--muted); font-size:11px; }
 .entry-strip dd { color:var(--text); margin:5px 0 0; font-size:13px; font-variant-numeric:tabular-nums; }
 .chart-footer { display:flex; flex-wrap:wrap; justify-content:space-between; gap:10px; color:var(--muted); font-size:11px; border-top:1px solid var(--line); padding-top:10px; margin-top:8px; }
+.chart-tooltip { font-size:11px; line-height:1.5; padding:12px; border-color:var(--green); border-radius:5px; }
+.chart-tooltip span:nth-child(2) { color:var(--green); padding-bottom:5px; border-bottom:1px solid var(--line); margin-bottom:5px; }
 
 /* Theme tokens also cover controls that otherwise inherit native gray chrome. */
 .settings-button,.modal-close,.chart-actions button,.tabs button,.intervals button {
