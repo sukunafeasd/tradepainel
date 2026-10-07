@@ -24,4 +24,5 @@ jobs:
       - run: pnpm exec playwright install chromium
       - run: pnpm run test:ui
       - run: pnpm audit --prod --audit-level high
-      - run: pnpm run build:all
+      - name: Build packages without publishing releases
+        run: pnpm exec electron-builder --win portable nsis --publish never
